@@ -80,6 +80,7 @@ impl Modify for SecurityAddon {
         http::connectors::ConnectorInfo,
         http::notifications::NotificationInfo,
         http::notifications::NotificationDetail,
+        http::notifications::WebhookInfo,
         crate::application::notify::Delivery,
         crate::domain::notification::NotificationType,
         crate::domain::notification::Event,

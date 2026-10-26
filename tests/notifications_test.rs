@@ -191,6 +191,14 @@ async fn a_sync_that_applies_a_change_sends_sync_succeeded() {
     assert_eq!(status, StatusCode::OK, "{list}");
     assert_eq!(list[0]["name"], "hook");
     assert_eq!(list[0]["destination"], "https://hooks.example.com");
+    // How it sends, never a value: a bearer token (a credential, auth left
+    // out), the default message, no signature.
+    assert_eq!(list[0]["webhook"]["auth"], "bearer");
+    assert_eq!(list[0]["webhook"]["method"], "POST");
+    assert_eq!(list[0]["webhook"]["templated"], false);
+    assert_eq!(list[0]["retries"], 0);
+    assert_eq!(list[0]["timeout_seconds"], 30);
+    assert!(!list.to_string().contains("hook-token"));
     assert_eq!(list[0]["last"]["ok"], true);
     assert_eq!(list[0]["last"]["event"], "sync_succeeded");
     assert_eq!(list[0]["last"]["status"], 202);

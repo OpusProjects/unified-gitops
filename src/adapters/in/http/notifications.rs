@@ -37,8 +37,30 @@ pub struct NotificationInfo {
     /// ascender and awx: through the template's webhook receiver or its launch API
     pub trigger: Option<JobTrigger>,
     pub credentials: Vec<String>,
+    /// How long one attempt may take, and how many times a send is retried
+    pub timeout_seconds: u64,
+    pub retries: u32,
+    /// webhook: its HTTP method, how the credential is sent, the names of
+    /// its fixed headers (never their values), whether it sends a template or
+    /// the default message, and the header its signature goes in, if signed
+    pub webhook: Option<WebhookInfo>,
+    /// ascender and awx, trigger launch: the names of the extra_vars it adds
+    /// beside the event (never their values)
+    pub extra_vars: Vec<String>,
     /// The last send since this process started, if any
     pub last: Option<Delivery>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct WebhookInfo {
+    pub method: String,
+    /// bearer, basic, none, or header (the credential in `auth_header`)
+    pub auth: String,
+    pub auth_header: Option<String>,
+    pub headers: Vec<String>,
+    /// true: a body template; false: the default message
+    pub templated: bool,
+    pub signature_header: Option<String>,
 }
 
 #[utoipa::path(
@@ -88,6 +110,41 @@ fn info(
         workflow_job_template: target.and_then(|t| t.workflow_job_template),
         trigger: target.map(|t| t.trigger),
         credentials: n.credentials().to_vec(),
+        timeout_seconds: n
+            .webhook
+            .as_ref()
+            .map(|w| w.timeout_seconds)
+            .or(target.map(|t| t.timeout_seconds))
+            .unwrap_or_default(),
+        retries: n
+            .webhook
+            .as_ref()
+            .map(|w| w.retries)
+            .or(target.map(|t| t.retries))
+            .unwrap_or_default(),
+        webhook: n.webhook.as_ref().map(|w| {
+            use crate::domain::notification::{Auth, AuthScheme};
+            let (auth, auth_header) = match &w.auth {
+                Auth::Header { header } => ("header", Some(header.clone())),
+                Auth::Scheme(AuthScheme::Basic) => ("basic", None),
+                Auth::Scheme(AuthScheme::None) => ("none", None),
+                Auth::Scheme(AuthScheme::Bearer) => ("bearer", None),
+                // Left out: a bearer token when there is a credential.
+                Auth::Default if w.credentials.is_empty() => ("none", None),
+                Auth::Default => ("bearer", None),
+            };
+            WebhookInfo {
+                method: w.method.clone(),
+                auth: auth.to_string(),
+                auth_header,
+                headers: w.headers.keys().cloned().collect(),
+                templated: w.body.is_some(),
+                signature_header: w.sign.as_ref().map(|s| s.header.clone()),
+            }
+        }),
+        extra_vars: target
+            .map(|t| t.extra_vars.keys().cloned().collect())
+            .unwrap_or_default(),
         last: state.notifier.log.last(id),
     }
 }
