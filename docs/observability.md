@@ -27,6 +27,8 @@ stops running pushes nothing, so only a scrape-time gauge shows the silence.
 | `unified_gitops_project_sync_last_success_age_seconds`    | project                  | Seconds since the last good pull              |
 | `unified_gitops_connector_calls_total`                       | application, connector, command, outcome | Calls to the systems: `list` reads, `apply` writes, `describe` starts a run |
 | `unified_gitops_connector_call_duration_seconds`             | application, connector, command | How long each call to a system took (histogram) |
+| `unified_gitops_git_requests_total`                       | project, operation, outcome | Requests to git servers: a `clone` or a `pull` per project, the `fetch` a rollback makes |
+| `unified_gitops_git_request_duration_seconds`             | project, operation       | How long each request to a git server took (histogram) |
 | `unified_gitops_webhooks_total`                      | webhook, event, outcome | Messages sent (`success`), failed after retries (`error`), or dropped by a full queue |
 | `unified_gitops_webhook_duration_seconds`            | webhook             | How long a send took, retries included (histogram) |
 | `unified_gitops_http_requests_total`                      | method, path, status     | Requests, by matched route                    |

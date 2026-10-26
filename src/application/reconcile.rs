@@ -258,7 +258,8 @@ async fn export_tree(
     let _fetching = lock.write().await;
     // Bounded like a pull: fetching history from a remote that never
     // answers must not hold the application's lock forever.
-    let sha = tokio::time::timeout(
+    let started = std::time::Instant::now();
+    let fetched = tokio::time::timeout(
         std::time::Duration::from_secs(project.timeout_seconds),
         r.git.export(
             &checkout,
@@ -275,9 +276,15 @@ async fn export_tree(
             "reading commit {revision} took longer than {} s",
             project.timeout_seconds
         )
-    })?
-    .map_err(|e| e.message)?;
-    Ok((exported, sha))
+    })
+    .and_then(|r| r.map_err(|e| e.message));
+    crate::application::projects::count_git_request(
+        &app.project,
+        "fetch",
+        fetched.is_ok(),
+        started,
+    );
+    Ok((exported, fetched?))
 }
 
 // What a rollback to `revision` would change, without changing anything:
