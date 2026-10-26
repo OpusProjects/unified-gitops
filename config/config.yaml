@@ -1,0 +1,25 @@
+server:
+  host: "0.0.0.0"
+  port: 8183
+  # The web UI on this same address: the image ships a build of unified-ui at
+  # /usr/share/unified-gitops/ui. Sign-in is the login page (an API key, or
+  # LDAP); with no api_keys items the API is open and so is the UI. Remove the
+  # block for an API without a UI.
+  ui:
+    enabled: true
+    assets_dir: "/usr/share/unified-gitops/ui"
+
+# The local copy of each system's current settings: one YAML file per application
+# and kind, refreshed from the system at every check. Mount a volume here to
+# keep it across restarts.
+state:
+  dir: "/var/lib/unified-gitops/state"
+
+projects:
+  dir: "/var/lib/unified-gitops/projects"
+
+# Optional: let an admin key read, write and reload this directory over HTTP.
+# OFF by default — turning it on means an admin key can rewrite every file the
+# loader reads, api_keys.yaml included. See docs/config-api.md.
+# config_api:
+#   enabled: true

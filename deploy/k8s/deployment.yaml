@@ -1,0 +1,100 @@
+# The Kubernetes deployment docs/deployment.md used to describe as fragments,
+# as a complete manifest — linted in CI with kubeconform, so it cannot drift
+# into invalid the way YAML in prose can.
+#
+# What the names refer to:
+#   unified-gitops-config   ConfigMap holding config.yaml and the item files (CONFIG_DIR;
+#                           flat, see deploy/README.md for folders)
+#   unified-gitops-env      Secret with the env table (API keys, credential values)
+#   unified-gitops-secrets  Secret with file-delivered secrets (SSH key, JSON files)
+#   unified-gitops-state    PVC for project checkouts and the local copy of
+#                           each system's settings
+# The Secrets can be plain, Sealed Secrets, or filled by External Secrets
+# Operator from Vault; nothing here depends on which.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unified-gitops
+  labels:
+    app: unified-gitops
+spec:
+  # One replica, always: the locks that keep a check and a sync of one application apart
+  # are in-process, so a second replica would check and apply on its own
+  # schedule, against the same systems.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: unified-gitops
+  template:
+    metadata:
+      labels:
+        app: unified-gitops
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: unified-gitops
+          image: ghcr.io/opusprojects/unified-gitops:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8183
+              name: http
+          env:
+            - name: CONFIG_DIR
+              value: /etc/unified-gitops
+          envFrom:
+            - secretRef:
+                name: unified-gitops-env
+          # The listener binds before the boot project clones (0.14+), so
+          # startup is quick even with unreachable git remotes; /readyz stays
+          # red until the first source has synced.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/unified-gitops
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/unified-gitops
+            - name: fleet-ssh
+              mountPath: /run/secrets/fleet-ssh
+              readOnly: true
+            - name: gitlab
+              mountPath: /run/secrets/gitlab.json
+              subPath: gitlab.json
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: unified-gitops-config
+        - name: state
+          persistentVolumeClaim:
+            claimName: unified-gitops-state
+        - name: fleet-ssh
+          secret:
+            secretName: unified-gitops-secrets
+            items:
+              - key: ssh-private-key
+                path: id_ed25519
+                mode: 256 # 0400 — the key is read-only for the app user
+        - name: gitlab
+          secret:
+            secretName: unified-gitops-secrets

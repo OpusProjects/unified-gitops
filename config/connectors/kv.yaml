@@ -1,0 +1,13 @@
+# A connector: how to run one script per type of system. The script answers
+# `describe` (what it manages: each type of object, the field that identifies
+# one, what goes first), `list --kind K` and `apply --kind K`
+# (docs/connectors.md); the core does the diffing.
+connectors:
+  - name: kv
+    description: "Key-value store (example)"
+    # Optional: script is the default (and, so far, the only type)
+    type: script
+    # Resolved inside the project's checkout per run
+    project: examples
+    path: "connectors/kv.py"
+    timeout_seconds: 60

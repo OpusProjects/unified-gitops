@@ -1,0 +1,11 @@
+kind: entry
+items:
+  - name: team-a.timeout
+    namespace: team-a
+    value: "0030"          # quoted: stays the string "0030"
+  - name: team-a.retries
+    namespace: team-a
+    value: 3
+  - name: team-b.region
+    namespace: team-b
+    value: eu-west
