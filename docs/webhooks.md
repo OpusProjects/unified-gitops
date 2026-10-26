@@ -24,12 +24,16 @@ Each run produces at most one event, so one change never arrives twice under two
 | `sync_failed` | A check or sync could not finish, or some operations failed | On entering the state |
 | `back_in_sync` | In sync again after a failure or a difference | On entering the state |
 
-- **Drift and commits are told apart by commit:** differences found at the commit the application
-  was last in sync at were made on the system; at a newer commit, they come from git.
+- **Drift and commits are told apart by the application's own folder:** differences found while its
+  folder in git is unchanged since it was last in sync were made on the system; after its folder
+  changed, they come from git. Commits to other folders change nothing here. Without git to ask
+  (a checkout that is not a repository), the `cause` is left out rather than guessed.
 - **With `auto_sync`, a reverted drift is one `drift_detected`** with `reverted: true`, not a
   `drift_detected` plus a `sync_succeeded`.
 - **History is in memory:** after a restart, the first run fires only failures and applied
   changes, so a restart does not report every pending difference again.
+- **While a rollback stands,** scheduled checks report only failures: they compare the system
+  with git's HEAD on purpose, and what they find is the rollback. The next manual sync ends it.
 
 ## Types
 
@@ -69,11 +73,14 @@ webhooks:
 
 - **`body`** is a template: `{{field}}` takes any field of [the message](#the-message), plus
   `{{revision_short}}`. Text is written escaped for a JSON string (write the quotes yourself); lists,
-  numbers and booleans as JSON. A name the message does not have fails the configuration.
+  numbers and booleans as JSON. A field with no value is `""` inside quotes and `null` outside
+  them, so the body stays valid JSON. A name the message does not have fails the configuration.
 - **`sign`** adds `X-Hub-Signature-256: sha256=<hex>` over the body, from the credential field
   `secret`. `header`, `prefix` and `secret_field` change those.
 - **Never in the YAML:** a token, a password, or a URL that carries one. They belong in
   credentials, which come from env vars or Vault.
+- **One header, one source:** a fixed header with the name the auth or the signature writes (say,
+  `Authorization` with a bearer credential) fails the configuration.
 
 The `ascender` and `awx` types start a job template through its webhook; see
 [Ascender and AWX](#ascender-and-awx).
@@ -105,8 +112,11 @@ The default body, and the fields a `body` template can use:
 
 - **`changes`** names each object, its operation and the names of the fields that changed, never
   their values: a value can be a secret, and the message leaves this instance.
-- **`cause`** is `commit`, `drift` or `rollback`; **`reverted`** is set on `drift_detected` only.
-- **`errors`**: the first five lines of a failure, for `sync_failed`.
+- **`cause`** is `commit`, `drift` or `rollback` (left out when it cannot be told); **`reverted`** is
+  set on `drift_detected` only.
+- **`errors`**: the first five lines of a failure, for `sync_failed`, as the connector or the
+  system reported them. Unlike `changes`, that is free text: a connector that prints a value in its
+  error sends it on.
 - **`url`** links the application in the UI when `server.url` is set.
 
 ## Ascender and AWX
@@ -138,11 +148,15 @@ webhooks:
 
 ## Sending, retries and what is kept
 
-- **A queue, not the run:** a run queues its event and moves on; a worker sends, eight at a time,
-  so a slow receiver never holds up a check or a sync. A full queue (1000) drops the newest message,
-  counted in the metrics.
+- **A queue, not the run:** a run queues its event and moves on; a worker sends, eight requests at a
+  time. A request holds its place only while it is being sent, never through the wait before a
+  retry, so a receiver that is down slows its own messages, not the others'. Past 1000 messages
+  waiting or being sent, the newest is dropped, counted in the metrics.
 - **Retries:** an unanswered send, a `429` or a `5xx` is retried `retries` times, waiting 2, 4, 8 …
-  up to 60 seconds. A `4xx` is not: a wrong key or template does not fix itself.
+  up to 60 seconds. A `4xx` is not, nor a request that cannot be built (a missing credential field,
+  a credential with a line break in it): those are the configuration's to fix.
+- **Shutdown:** after the last runs finish, what they queued is still sent, within
+  `server.shutdown_grace_seconds`; whatever is left then is dropped and logged.
 - **Redirects are not followed:** the body and its credential go only where the configuration says.
 - **What is kept:** each webhook's last 50 sends (event, application, result, status,
   error), in memory: the last on `GET /api/v1/webhooks`, all of them on

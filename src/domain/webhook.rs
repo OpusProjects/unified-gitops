@@ -155,14 +155,21 @@ pub struct HttpTarget {
 #[serde(untagged)]
 pub enum Auth {
     Scheme(AuthScheme),
-    Header {
-        header: String,
-    },
+    Header(HeaderAuth),
     // `auth:` left out: a bearer token when there is a credential, nothing
     // when there is none.
     #[default]
     #[serde(skip)]
     Default,
+}
+
+// `auth: {header: Name}`: the credential's token in a header of that name.
+// Strict like every other block: `{header: X, value: y}` is a typo, not a
+// setting to ignore.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeaderAuth {
+    pub header: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -339,13 +346,13 @@ impl HttpTarget {
             errors.extend(template_errors(body));
         }
         let needs_credential = match &self.auth {
-            Auth::Scheme(AuthScheme::Bearer | AuthScheme::Basic) | Auth::Header { .. } => true,
+            Auth::Scheme(AuthScheme::Bearer | AuthScheme::Basic) | Auth::Header(_) => true,
             Auth::Scheme(AuthScheme::None) | Auth::Default => false,
         };
         if needs_credential && self.credentials.is_empty() {
             errors.push("webhook.auth needs a credential in webhook.credentials".to_string());
         }
-        if let Auth::Header { header } = &self.auth
+        if let Auth::Header(HeaderAuth { header }) = &self.auth
             && !is_header_name(header)
         {
             errors.push(format!(
@@ -368,6 +375,37 @@ impl HttpTarget {
                 errors.push("webhook.sign needs a credential holding its secret".to_string());
             }
         }
+        // One header, one source: a fixed header with the name the auth or
+        // the signature writes would be sent twice.
+        let mut written: Vec<(&str, &str)> = Vec::new();
+        match &self.auth {
+            Auth::Scheme(AuthScheme::Bearer | AuthScheme::Basic) => {
+                written.push(("Authorization", "webhook.auth"))
+            }
+            Auth::Default if !self.credentials.is_empty() => {
+                written.push(("Authorization", "webhook.auth"))
+            }
+            Auth::Header(HeaderAuth { header }) => written.push((header, "webhook.auth")),
+            _ => {}
+        }
+        if let Some(sign) = &self.sign {
+            written.push((&sign.header, "webhook.sign"));
+        }
+        for (i, (name, by)) in written.iter().enumerate() {
+            if self.headers.keys().any(|h| h.eq_ignore_ascii_case(name)) {
+                errors.push(format!(
+                    "webhook.headers sets '{name}', which {by} writes: set it in one place"
+                ));
+            }
+            if written[..i]
+                .iter()
+                .any(|(other, _)| other.eq_ignore_ascii_case(name))
+            {
+                errors.push(format!(
+                    "webhook.auth and webhook.sign both write '{name}': give them different headers"
+                ));
+            }
+        }
         errors.extend(bounds_errors("webhook", self.timeout_seconds, self.retries));
         errors
     }
@@ -379,8 +417,8 @@ impl JobTemplateTarget {
         errors.extend(url_errors("url", &self.url));
         if self.url.trim_end_matches('/').ends_with("/api") || self.url.contains("/api/v2") {
             errors.push(format!(
-                "url '{}' is the controller's address, without /api",
-                self.url
+                "url '{}…' is the controller's address, without /api",
+                origin(&self.url)
             ));
         }
         match (self.job_template, self.workflow_job_template) {
@@ -459,11 +497,38 @@ fn template_errors(body: &str) -> Vec<String> {
 
 // Every {{name}} in a template, in order.
 pub fn placeholders(template: &str) -> impl Iterator<Item = &str> {
-    template.split("{{").skip(1).filter_map(|rest| {
-        rest.split_once("}}")
-            .map(|(name, _)| name.trim())
-            .filter(|name| !name.is_empty())
+    template_parts(template).filter_map(|part| match part {
+        TemplatePart::Field(name) => Some(name),
+        TemplatePart::Text(_) => None,
     })
+}
+
+// A template, split once, the same way for checking it at load and for
+// rendering it: text, and the {{field}} placeholders in it. A `{{` with no
+// `}}` after it, or with nothing between them, is text.
+pub enum TemplatePart<'a> {
+    Text(&'a str),
+    Field(&'a str),
+}
+
+pub fn template_parts(template: &str) -> impl Iterator<Item = TemplatePart<'_>> {
+    let mut pieces = template.split("{{");
+    let first = pieces.next().map(TemplatePart::Text);
+    first.into_iter().chain(pieces.flat_map(|piece| {
+        match piece.split_once("}}") {
+            Some((name, after)) if !name.trim().is_empty() => [
+                Some(TemplatePart::Field(name.trim())),
+                Some(TemplatePart::Text(after)),
+            ],
+            // Not a placeholder: the `{{` is text, and so is what follows it.
+            _ => [
+                Some(TemplatePart::Text("{{")),
+                Some(TemplatePart::Text(piece)),
+            ],
+        }
+        .into_iter()
+        .flatten()
+    }))
 }
 
 fn is_header_name(name: &str) -> bool {
@@ -558,10 +623,20 @@ mod tests {
         );
         assert_eq!(
             header.webhook.unwrap().auth,
-            Auth::Header {
+            Auth::Header(HeaderAuth {
                 header: "X-Gitlab-Token".into()
-            }
+            })
         );
+        // Strict: a key the header form does not have is an error.
+        assert!(serde_saphyr::from_str::<Webhook>(
+            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n  credentials: [c]\n  auth: {header: X-Key, value: y}\n"
+        )
+        .is_err());
+        // One header, one source.
+        let twice = parse(
+            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n  credentials: [c]\n  headers: {authorization: x}\n",
+        );
+        assert!(twice.errors("n").join("").contains("set it in one place"));
         let missing = parse(
             "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n  auth: bearer\n",
         );

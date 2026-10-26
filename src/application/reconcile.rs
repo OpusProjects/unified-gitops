@@ -125,6 +125,7 @@ pub async fn reconcile(
         .read_owned()
         .await;
     let revision = r.git.revision(&checkout).await;
+    let tree = r.git.tree(&checkout, app.folder()).await;
     let record = reconcile_tree(
         r,
         catalog,
@@ -132,7 +133,7 @@ pub async fn reconcile(
         app,
         &checkout,
         Some(reading),
-        revision,
+        (revision, tree),
         mode,
         trigger,
     )
@@ -189,7 +190,9 @@ pub async fn rollback(
         app,
         &tree,
         None,
-        Some(sha.clone()),
+        // An exported folder: no tree to compare drift with, and a rollback
+        // is never measured against anyway.
+        (Some(sha.clone()), None),
         RunMode::Apply,
         Trigger::Rollback,
     )
@@ -302,6 +305,7 @@ pub async fn preview_rollback(
         started_at: now(),
         finished_at: now(),
         revision: Some(sha.clone()),
+        tree: None,
         planned: 0,
         operations: Vec::new(),
         applied: Vec::new(),
@@ -333,7 +337,8 @@ async fn reconcile_tree(
     app: &Application,
     checkout: &Path,
     reading: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
-    revision: Option<String>,
+    // The commit and the folder's tree read (GitPort::revision, ::tree).
+    (revision, tree): (Option<String>, Option<String>),
     mode: RunMode,
     trigger: Trigger,
 ) -> RunRecord {
@@ -346,6 +351,7 @@ async fn reconcile_tree(
         started_at,
         finished_at: started_at,
         revision: revision.clone(),
+        tree,
         planned: 0,
         operations: Vec::new(),
         applied: Vec::new(),
@@ -390,7 +396,8 @@ async fn reconcile_tree(
         _ => r.health.record_success(app_id),
     }
     // Where it stood before this run, read before the run is recorded over it.
-    let before = r.states.baseline(app_id);
+    let mut before = r.states.baseline(app_id);
+    before.rolled_back = r.store.rollback(app_id).is_some();
     r.states.record(app_id, status, snapshot, record.clone());
     if let Some(detected) = crate::application::webhooks::detect(&before, &record, status) {
         crate::application::webhooks::after_run(

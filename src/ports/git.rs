@@ -34,6 +34,15 @@ pub trait GitPort: Send + Sync {
         Box::pin(async { None })
     }
 
+    // The git tree id of `folder` at the checkout's HEAD: it changes only
+    // when something in that folder does, unlike the commit, which any change
+    // anywhere in the repository moves. What tells drift (the system changed)
+    // from a commit (git changed) for one application. Works on a shallow
+    // clone. None when it cannot tell.
+    fn tree(&self, _dir: &Path, _folder: &str) -> RevisionFuture<'_> {
+        Box::pin(async { None })
+    }
+
     // Write `path` of the checkout in `dir` as it was at `revision` into
     // `dest`, without touching the checkout itself (its files, index and
     // HEAD stay where the pulls left them): what a rollback applies. Answers

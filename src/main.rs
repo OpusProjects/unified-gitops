@@ -269,6 +269,7 @@ async fn main() {
     // shutdown_grace_seconds — for in-flight runs to finish. Past the grace
     // the process exits anyway: blocking on a wedged connector would only trade
     // a clean exit for a SIGKILL.
+    let shutdown_started = std::time::Instant::now();
     let _ = shutdown_tx.send(true);
     let handles: Vec<tokio::task::JoinHandle<()>> =
         std::mem::take(background_tasks.lock().expect("handle registry").as_mut());
@@ -289,6 +290,16 @@ async fn main() {
         );
     } else {
         info!("Background tasks drained");
+    }
+
+    // Then the webhooks those last runs queued, in what is left of the grace:
+    // a drift reverted in the very last run must still be reported.
+    let left = state
+        .dispatcher
+        .drain(grace.saturating_sub(shutdown_started.elapsed()))
+        .await;
+    if left > 0 {
+        warn!(left, "Webhook messages still unsent at shutdown — dropped");
     }
 
     info!("Shutdown complete");

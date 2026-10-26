@@ -115,7 +115,7 @@ fn info(state: &AppState, id: &str, n: &crate::domain::webhook::Webhook) -> Webh
         request: n.webhook.as_ref().map(|w| {
             use crate::domain::webhook::{Auth, AuthScheme};
             let (auth, auth_header) = match &w.auth {
-                Auth::Header { header } => ("header", Some(header.clone())),
+                Auth::Header(h) => ("header", Some(h.header.clone())),
                 Auth::Scheme(AuthScheme::Basic) => ("basic", None),
                 Auth::Scheme(AuthScheme::None) => ("none", None),
                 Auth::Scheme(AuthScheme::Bearer) => ("bearer", None),
@@ -213,7 +213,7 @@ pub async fn test_webhook(
             webhook: webhook.clone(),
             message,
         },
-        false,
+        None,
     )
     .await;
     crate::adapters::r#in::http::audit::record(

@@ -21,12 +21,20 @@ pub struct OutboundResponse {
     pub body: String,
 }
 
+// A request that got no answer. `retryable` is false when it could not even
+// be built (a malformed URL): sending it again would fail the same way.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SendError {
+    pub message: String,
+    pub retryable: bool,
+}
+
 pub type SendFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<OutboundResponse, String>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<OutboundResponse, SendError>> + Send + 'a>>;
 
 // Sends webhooks. Err is a request that got no answer (refused, timed
-// out, TLS); any answer, error statuses included, is Ok, and the caller
-// decides what it means for its receiver.
+// out, TLS, or not buildable); any answer, error statuses included, is Ok,
+// and the caller decides what it means for its receiver.
 pub trait HttpSenderPort: Send + Sync {
     fn send(&self, request: OutboundRequest) -> SendFuture<'_>;
 }

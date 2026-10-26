@@ -175,7 +175,9 @@ async fn a_sync_that_applies_a_change_sends_sync_succeeded() {
     let body: Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(body["event"], "sync_succeeded");
     assert_eq!(body["application"], "app-demo");
-    assert_eq!(body["cause"], "commit");
+    // The checkout here is a plain folder, not git: no tree to tell a commit
+    // from drift by, so the cause is unknown rather than guessed.
+    assert_eq!(body["cause"], Value::Null);
     assert_eq!(body["applied"], 1);
     assert_eq!(body["changes"][0]["kind"], "namespace");
     assert_eq!(body["webhook"], "hook");
@@ -314,5 +316,6 @@ async fn the_http_sender_delivers_and_does_not_follow_redirects() {
         })
         .await
         .unwrap_err();
-    assert!(!unreachable.contains("secret"), "{unreachable}");
+    assert!(!unreachable.message.contains("secret"), "{unreachable:?}");
+    assert!(unreachable.retryable, "no answer is worth retrying");
 }
