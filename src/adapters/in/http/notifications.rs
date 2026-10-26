@@ -23,7 +23,10 @@ pub struct NotificationInfo {
     #[serde(rename = "type")]
     pub notification_type: NotificationType,
     pub events: Vec<Event>,
-    /// Applications it listens to; empty = every application
+    /// Every application, present and future (`applications: all`)
+    pub all_applications: bool,
+    /// The applications it listens to, when it names them; empty with
+    /// all_applications false = none
     pub applications: Vec<String>,
     /// Where it sends: scheme and host only, never a path or query, which
     /// can carry a receiver's secret
@@ -58,27 +61,75 @@ pub async fn list_notifications(
     let mut out: Vec<NotificationInfo> = config
         .notifications
         .iter()
-        .map(|(id, n)| {
-            let target = n.ascender.as_ref().or(n.awx.as_ref());
-            let mut applications = n.applications.clone();
-            applications.sort();
-            NotificationInfo {
-                name: id.clone(),
-                description: n.description.clone(),
-                notification_type: n.notification_type,
-                events: n.events.clone(),
-                applications,
-                destination: n.destination(),
-                job_template: target.and_then(|t| t.job_template),
-                workflow_job_template: target.and_then(|t| t.workflow_job_template),
-                trigger: target.map(|t| t.trigger),
-                credentials: n.credentials().to_vec(),
-                last: state.notifier.log.last(id),
-            }
-        })
+        .map(|(id, n)| info(&state, id, n))
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Json(out))
+}
+
+// One notification as the list shows it.
+fn info(
+    state: &AppState,
+    id: &str,
+    n: &crate::domain::notification::Notification,
+) -> NotificationInfo {
+    let target = n.ascender.as_ref().or(n.awx.as_ref());
+    let mut applications = n.applications.named().to_vec();
+    applications.sort();
+    NotificationInfo {
+        name: id.to_string(),
+        description: n.description.clone(),
+        notification_type: n.notification_type,
+        events: n.events.clone(),
+        all_applications: n.applications.is_all(),
+        applications,
+        destination: n.destination(),
+        job_template: target.and_then(|t| t.job_template),
+        workflow_job_template: target.and_then(|t| t.workflow_job_template),
+        trigger: target.map(|t| t.trigger),
+        credentials: n.credentials().to_vec(),
+        last: state.notifier.log.last(id),
+    }
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct NotificationDetail {
+    #[serde(flatten)]
+    pub notification: NotificationInfo,
+    /// Its sends since this process started, newest first, at most 50.
+    /// Retries of one message count as one send
+    pub history: Vec<Delivery>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/notifications/{id}",
+    tag = "Notifications",
+    params(("id" = String, Path, description = "Notification name")),
+    responses(
+        (status = 200, description = "One notification, with its recent sends", body = NotificationDetail),
+        (status = 403, description = "API key is not admin", body = ErrorBody),
+        (status = 404, description = "No such notification", body = ErrorBody)
+    )
+)]
+pub async fn get_notification(
+    State(state): State<Arc<AppState>>,
+    axum::Extension(auth): axum::Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> Result<Json<NotificationDetail>, ApiError> {
+    if !auth.permissions.is_admin() {
+        return Err(ApiError::admin_only());
+    }
+    let config = state.config();
+    let Some(n) = config.notifications.get(&id) else {
+        return Err(ApiError::not_found(format!(
+            "notification '{id}' is not configured"
+        )));
+    };
+    Ok(Json(NotificationDetail {
+        notification: info(&state, &id, n),
+        history: state.notifier.log.history(&id),
+    }))
 }
 
 #[utoipa::path(

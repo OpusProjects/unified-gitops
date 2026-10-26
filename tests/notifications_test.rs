@@ -91,7 +91,7 @@ fn fixture() -> Fixture {
     let project: unified_gitops::domain::project::GitProject =
         serde_saphyr::from_str("git_url: https://example.com/state.git\n").unwrap();
     let hook: unified_gitops::domain::notification::Notification = serde_saphyr::from_str(
-        "type: webhook\nevents: [sync_succeeded, sync_failed]\nwebhook:\n  url: https://hooks.example.com/services/T0/secret-path\n  credentials: [cred-hook]\n  retries: 0\n",
+        "type: webhook\nevents: [sync_succeeded, sync_failed]\napplications: all\nwebhook:\n  url: https://hooks.example.com/services/T0/secret-path\n  credentials: [cred-hook]\n  retries: 0\n",
     )
     .unwrap();
 
@@ -223,6 +223,16 @@ async fn send_test_sends_now_and_answers_the_outcome() {
     let sent = f.recorder.sent.lock().unwrap().clone();
     let body: Value = serde_json::from_slice(&sent[0].body).unwrap();
     assert_eq!(body["event"], "test");
+
+    // Kept in its history, newest first.
+    call(&f.app, "POST", "/api/v1/notifications/hook/test").await;
+    let (status, detail) = call(&f.app, "GET", "/api/v1/notifications/hook").await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["name"], "hook");
+    assert_eq!(detail["history"].as_array().unwrap().len(), 2);
+    assert_eq!(detail["history"][0]["event"], "test");
+    let (status, _) = call(&f.app, "GET", "/api/v1/notifications/nope").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
     let (status, _) = call(&f.app, "POST", "/api/v1/notifications/nope/test").await;
     assert_eq!(status, StatusCode::NOT_FOUND);

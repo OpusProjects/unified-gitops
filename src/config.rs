@@ -542,7 +542,7 @@ impl AppConfig {
         // to and the credentials they send with.
         for (id, notification) in &self.notifications {
             errors.extend(notification.errors(id));
-            for app_id in &notification.applications {
+            for app_id in notification.applications.named() {
                 if !self.applications.contains_key(app_id) {
                     errors.push(format!(
                         "Notification '{id}' references unknown application '{app_id}'"
@@ -967,7 +967,7 @@ mod tests {
         ]);
         let cfg = load_config(dir.path().to_str().unwrap()).expect("loads");
         let n = &cfg.notifications["ntf-ascender-drift"];
-        assert_eq!(n.applications, vec!["portainer".to_string()]);
+        assert_eq!(n.applications.named(), ["portainer".to_string()]);
     }
 
     #[test]

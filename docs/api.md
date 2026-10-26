@@ -19,6 +19,7 @@ session also need its `X-CSRF-Token`). Every failure is `{"error": "..."}`.
 | `/api/v1/search?q=`                   | GET    | any key (its apps)   | Find an object by key or value: its application, kind, whether git declares it |
 | `/api/v1/connectors`                     | GET    | admin                | Connectors: script, project, timeout, who uses them |
 | `/api/v1/notifications`               | GET    | admin                | Notifications: events, destination, last send      |
+| `/api/v1/notifications/{id}`          | GET    | admin                | One notification and its last 50 sends             |
 | `/api/v1/notifications/{id}/test`     | POST   | admin                | Send a test message now, once; answers the outcome |
 | `/api/v1/projects`                    | GET    | admin                | Git checkouts, their health, what uses them        |
 | `/api/v1/projects/{id}/sync`          | POST   | admin                | Pull a project now                                 |

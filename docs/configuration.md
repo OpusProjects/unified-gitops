@@ -182,7 +182,7 @@ notifications:
   - name: ntf-ascender-drift
     type: ascender                     # webhook | ascender | awx
     events: [drift_detected]
-    applications: [isilon-prod]        # empty = every application
+    applications: [isilon-prod]        # or all; left out or [] = none
     ascender:
       url: "https://ascender.example.com"
       job_template: 123

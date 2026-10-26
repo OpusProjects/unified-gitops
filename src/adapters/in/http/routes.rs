@@ -72,6 +72,10 @@ pub fn create_router(state: Arc<AppState>, api_keys: Arc<ApiKeyRegistry>) -> Rou
             get(http::notifications::list_notifications),
         )
         .route(
+            "/api/v1/notifications/{id}",
+            get(http::notifications::get_notification),
+        )
+        .route(
             "/api/v1/notifications/{id}/test",
             post(http::notifications::test_notification),
         )

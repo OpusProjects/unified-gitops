@@ -8,7 +8,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Notifications: a `notifications` item sends `drift_detected`, `out_of_sync`, `sync_succeeded`, `sync_failed` and `back_in_sync` to a webhook (any receiver, with bearer, basic or header auth, a body template and optional HMAC signing) or to an Ascender or AWX job template (its webhook receiver or its launch API), one message per run, queued and retried, never with a field's value; `GET /api/v1/notifications` shows each one's last send and `POST /api/v1/notifications/{id}/test` sends a test (see `docs/notifications.md`).
+- Notifications: a `notifications` item sends, for `all` applications or the ones it names, `drift_detected`, `out_of_sync`, `sync_succeeded`, `sync_failed` and `back_in_sync` to a webhook (any receiver, with bearer, basic or header auth, a body template and optional HMAC signing) or to an Ascender or AWX job template (its webhook receiver or its launch API), one message per run, queued and retried, never with a field's value; `GET /api/v1/notifications` shows each one's last send, `GET /api/v1/notifications/{id}` its last 50, and `POST /api/v1/notifications/{id}/test` sends a test (see `docs/notifications.md`).
 
 ### Changed
 

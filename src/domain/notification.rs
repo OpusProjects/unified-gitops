@@ -16,15 +16,58 @@ pub struct Notification {
     #[serde(rename = "type")]
     pub notification_type: NotificationType,
     pub events: Vec<Event>,
-    // Empty = every application.
+    // `all`, or the applications by name. Left out or `[]`: none, as an API
+    // key or an LDAP rule with no applications reaches none.
     #[serde(default)]
-    pub applications: Vec<String>,
+    pub applications: Applications,
     #[serde(default)]
     pub webhook: Option<WebhookTarget>,
     #[serde(default)]
     pub ascender: Option<JobTemplateTarget>,
     #[serde(default)]
     pub awx: Option<JobTemplateTarget>,
+}
+
+// Which applications a notification listens to: the word `all`, or a list.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum Applications {
+    All(AllWord),
+    Named(Vec<String>),
+}
+
+// The one word `applications:` takes instead of a list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllWord {
+    All,
+}
+
+impl Default for Applications {
+    fn default() -> Self {
+        Applications::Named(Vec::new())
+    }
+}
+
+impl Applications {
+    pub fn is_all(&self) -> bool {
+        matches!(self, Applications::All(_))
+    }
+
+    // The applications named; empty for `all`.
+    pub fn named(&self) -> &[String] {
+        match self {
+            Applications::All(_) => &[],
+            Applications::Named(names) => names,
+        }
+    }
+
+    pub fn includes(&self, application: &str) -> bool {
+        match self {
+            Applications::All(_) => true,
+            Applications::Named(names) => names.iter().any(|a| a == application),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
@@ -291,8 +334,7 @@ impl Notification {
 
     // Whether this notification wants `event` from `application`.
     pub fn wants(&self, event: Event, application: &str) -> bool {
-        self.events.contains(&event)
-            && (self.applications.is_empty() || self.applications.iter().any(|a| a == application))
+        self.events.contains(&event) && self.applications.includes(application)
     }
 
     // Where it sends, without anything a URL can carry that is secret: a
@@ -607,9 +649,23 @@ mod tests {
         assert!(n.wants(Event::SyncFailed, "a"));
         assert!(!n.wants(Event::SyncFailed, "b"));
         assert!(!n.wants(Event::DriftDetected, "a"));
-        let all =
-            parse("type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n");
+        let all = parse(
+            "type: webhook\nevents: [sync_failed]\napplications: all\nwebhook:\n  url: https://x.example.com\n",
+        );
+        assert!(all.applications.is_all());
         assert!(all.wants(Event::SyncFailed, "anything"));
+        // Left out or empty: none, as an API key with no applications.
+        let none =
+            parse("type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n");
+        assert!(!none.wants(Event::SyncFailed, "anything"));
+        let empty = parse(
+            "type: webhook\nevents: [sync_failed]\napplications: []\nwebhook:\n  url: https://x.example.com\n",
+        );
+        assert!(!empty.wants(Event::SyncFailed, "anything"));
+        assert!(serde_saphyr::from_str::<Notification>(
+            "type: webhook\nevents: [sync_failed]\napplications: every\nwebhook:\n  url: https://x.example.com\n"
+        )
+        .is_err());
     }
 
     #[test]

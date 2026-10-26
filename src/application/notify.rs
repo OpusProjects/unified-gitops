@@ -493,8 +493,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-// The last send of each notification, for the API and the UI. In memory,
-// like run history.
+// One send of a notification, for the API and the UI.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Delivery {
     pub event: String,
@@ -510,18 +509,34 @@ pub struct Delivery {
     pub error: Option<String>,
 }
 
+// How many sends each notification keeps. In memory, like run history: a
+// restart starts it over.
+pub const DELIVERY_HISTORY: usize = 50;
+
+// Each notification's recent sends, newest first.
 #[derive(Default)]
 pub struct DeliveryLog {
-    last: DashMap<String, Delivery>,
+    sends: DashMap<String, std::collections::VecDeque<Delivery>>,
 }
 
 impl DeliveryLog {
     pub fn last(&self, notification_id: &str) -> Option<Delivery> {
-        self.last.get(notification_id).map(|d| d.clone())
+        self.sends
+            .get(notification_id)
+            .and_then(|h| h.front().cloned())
+    }
+
+    pub fn history(&self, notification_id: &str) -> Vec<Delivery> {
+        self.sends
+            .get(notification_id)
+            .map(|h| h.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     fn record(&self, notification_id: &str, delivery: Delivery) {
-        self.last.insert(notification_id.to_string(), delivery);
+        let mut history = self.sends.entry(notification_id.to_string()).or_default();
+        history.push_front(delivery);
+        history.truncate(DELIVERY_HISTORY);
     }
 }
 
@@ -1133,6 +1148,31 @@ mod tests {
             body: r#"{"detail": "You do not have permission"}"#.into(),
         };
         assert!(interpret(&n, &refused).unwrap_err().starts_with("HTTP 403"));
+    }
+
+    #[test]
+    fn the_log_keeps_the_newest_sends_first_and_bounded() {
+        let log = DeliveryLog::default();
+        for i in 0..(DELIVERY_HISTORY as u64 + 5) {
+            log.record(
+                "n",
+                Delivery {
+                    event: "test".into(),
+                    application: None,
+                    at: i,
+                    ok: true,
+                    attempts: 1,
+                    status: Some(202),
+                    job: None,
+                    error: None,
+                },
+            );
+        }
+        let history = log.history("n");
+        assert_eq!(history.len(), DELIVERY_HISTORY);
+        assert_eq!(history[0].at, DELIVERY_HISTORY as u64 + 4);
+        assert_eq!(log.last("n").unwrap().at, history[0].at);
+        assert!(log.history("other").is_empty());
     }
 
     #[test]

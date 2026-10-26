@@ -42,7 +42,7 @@ notifications:
     description: "Any application that fails"
     type: webhook
     events: [sync_failed, back_in_sync]
-    applications: []                     # empty = every application
+    applications: all                    # all, or a list; left out or [] = none
     webhook:
       url: "https://alerts.example.com/hooks/unified-gitops"
       method: POST                       # POST (default), PUT or PATCH
@@ -55,6 +55,10 @@ notifications:
       timeout_seconds: 30
       retries: 3
 ```
+
+- **`applications`** is `all` (every application, present and future), or the applications by name.
+  Left out or `[]`, it listens to none, as an API key or an LDAP rule with no applications reaches
+  none; Send test still works.
 
 | `auth` | What is sent | Credential field |
 | --- | --- | --- |
@@ -145,9 +149,10 @@ notifications:
 - **Retries:** an unanswered send, a `429` or a `5xx` is retried `retries` times, waiting 2, 4, 8 …
   up to 60 seconds. A `4xx` is not: a wrong key or template does not fix itself.
 - **Redirects are not followed:** the body and its credential go only where the configuration says.
-- **What is kept:** each notification's last send (event, application, result, status, job,
-  error), in memory, on `GET /api/v1/notifications`. `POST /api/v1/notifications/{id}/test`
-  sends a test message now, once, and answers the outcome.
+- **What is kept:** each notification's last 50 sends (event, application, result, status, job,
+  error), in memory: the last on `GET /api/v1/notifications`, all of them on
+  `GET /api/v1/notifications/{id}`. `POST /api/v1/notifications/{id}/test` sends a test message
+  now, once, and answers the outcome.
 - **Metrics:** `unified_gitops_notifications_total{notification,event,outcome}` (`success`,
   `error`, `dropped`) and `unified_gitops_notification_duration_seconds`.
 - **Reload:** notifications reload like applications. A message keeps the definition it was queued
