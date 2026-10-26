@@ -28,6 +28,9 @@ pub struct Catalog<'a> {
     pub applications: &'a HashMap<String, Application>,
     pub connectors: &'a HashMap<String, Connector>,
     pub projects: &'a HashMap<String, GitProject>,
+    pub notifications: &'a HashMap<String, crate::domain::notification::Notification>,
+    // server.url, for links in notifications.
+    pub url: Option<&'a str>,
 }
 
 // The ports and registries a run uses.
@@ -45,6 +48,8 @@ pub struct Reconciler<'a> {
     pub project_health: &'a SyncHealthRegistry,
     // What each connector last described, for search.
     pub described: &'a crate::domain::connector::DescribedKinds,
+    // Queues what a run has to tell (application::notify).
+    pub notifier: &'a crate::application::notify::Dispatcher,
 }
 
 // Pull the application's project, then reconcile. What every run should do —
@@ -384,7 +389,24 @@ async fn reconcile_tree(
         }
         _ => r.health.record_success(app_id),
     }
+    // Where it stood before this run, read before the run is recorded over it.
+    let before = r.states.baseline(app_id);
     r.states.record(app_id, status, snapshot, record.clone());
+    if let Some(detected) = crate::application::notify::detect(&before, &record, status) {
+        crate::application::notify::after_run(
+            r.notifier,
+            catalog.notifications,
+            &crate::application::notify::RunOutcome {
+                application: app_id,
+                description: app.description.as_deref(),
+                base_url: catalog.url,
+                before: &before,
+                status,
+                record: &record,
+                detected: &detected,
+            },
+        );
+    }
     tracing::info!(
         application = %app_id,
         mode = ?mode,

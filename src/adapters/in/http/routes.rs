@@ -67,6 +67,14 @@ pub fn create_router(state: Arc<AppState>, api_keys: Arc<ApiKeyRegistry>) -> Rou
         )
         .route("/api/v1/search", get(http::search::search_objects))
         .route("/api/v1/connectors", get(http::connectors::list_connectors))
+        .route(
+            "/api/v1/notifications",
+            get(http::notifications::list_notifications),
+        )
+        .route(
+            "/api/v1/notifications/{id}/test",
+            post(http::notifications::test_notification),
+        )
         .route("/api/v1/projects", get(http::projects::list_projects))
         .route(
             "/api/v1/projects/{id}/sync",

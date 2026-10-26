@@ -69,6 +69,7 @@ pub struct ReloadReport {
     pub connectors: SectionDelta,
     pub projects: SectionDelta,
     pub credentials: SectionDelta,
+    pub notifications: SectionDelta,
 }
 
 impl ReloadReport {
@@ -147,6 +148,7 @@ fn runtime_config(cfg: &AppConfig) -> RuntimeConfig {
         applications: cfg.applications.clone(),
         connectors: cfg.connectors.clone(),
         credentials: cfg.credentials.clone(),
+        notifications: cfg.notifications.clone(),
         projects: cfg.projects.clone(),
         secrets: cfg.secrets_config.clone(),
         metrics_require_auth: cfg.server.metrics_require_auth,
@@ -176,6 +178,7 @@ fn diff(
         connectors: SectionDelta::between(&previous.connectors, &next.connectors),
         projects: SectionDelta::between(&previous.projects, &next.projects),
         credentials: SectionDelta::between(&previous.credentials, &next.credentials),
+        notifications: SectionDelta::between(&previous.notifications, &next.notifications),
         ..ReloadReport::default()
     };
 
@@ -185,6 +188,7 @@ fn diff(
         ("connectors", &report.connectors),
         ("projects", &report.projects),
         ("credentials", &report.credentials),
+        ("notifications", &report.notifications),
     ] {
         if !delta.is_empty() {
             applied.push(name.to_string());

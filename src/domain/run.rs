@@ -171,10 +171,20 @@ pub const RECORDED_OPERATIONS: usize = 200;
 // would otherwise keep ten thousand of them, times HISTORY.
 pub const RECORDED_ERRORS: usize = 50;
 
+// An application's standing before a run (AppStateRegistry::baseline).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Baseline {
+    pub status: SyncStatus,
+    pub synced_revision: Option<String>,
+}
+
 #[derive(Default)]
 struct Entry {
     status: Option<SyncStatus>,
     revision: Option<String>,
+    // The commit the application was last found in sync at. Differences found
+    // at that same commit were made outside git: drift (application::notify).
+    synced_revision: Option<String>,
     plan: Option<PlanSnapshot>,
     history: VecDeque<RunRecord>,
 }
@@ -211,6 +221,9 @@ impl AppStateRegistry {
         if run.revision.is_some() {
             entry.revision = run.revision.clone();
         }
+        if status == SyncStatus::Synced && run.revision.is_some() {
+            entry.synced_revision = run.revision.clone();
+        }
         if plan.is_some() {
             entry.plan = plan;
         }
@@ -232,6 +245,22 @@ impl AppStateRegistry {
                 revision: None,
                 plan: None,
                 history: Vec::new(),
+            },
+        }
+    }
+
+    // Where the application stood before a run: what notifications compare
+    // the run's outcome with.
+    pub fn baseline(&self, app_id: &str) -> Baseline {
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        match entries.get(app_id) {
+            Some(e) => Baseline {
+                status: e.status.unwrap_or(SyncStatus::Unknown),
+                synced_revision: e.synced_revision.clone(),
+            },
+            None => Baseline {
+                status: SyncStatus::Unknown,
+                synced_revision: None,
             },
         }
     }

@@ -20,8 +20,10 @@ as startup does, and exits.
 │   └── desired-state.yaml
 ├── credentials/
 │   └── cred-isilon.yaml
-└── api_keys/
-    └── key-pipeline.yaml
+├── api_keys/
+│   └── key-pipeline.yaml
+└── notifications/
+    └── ntf-failures.yaml
 ```
 
 | Top-level key  | Holds                                                         |
@@ -31,6 +33,7 @@ as startup does, and exits.
 | `projects`     | Git repositories: desired state, and connector scripts           |
 | `credentials`  | Where each credential's secrets come from (never the values)  |
 | `api_keys`     | API keys by name and role (the values come from env vars)     |
+| `notifications` | What runs report, and where: webhooks, Ascender and AWX job templates |
 
 - **The key says what an item is, never the folder.** A file in `connectors/` holding `applications:` is
   read as an application.
@@ -168,6 +171,23 @@ api_keys:
 
 `UNIFIED_GITOPS_KEY`, if set, is one more admin key. With no keys at all the API is open, which is
 logged loudly at startup.
+
+## notifications
+
+Which events, from which applications, go where. The full reference is [notifications.md](notifications.md):
+
+```yaml
+# notifications/ntf-ascender-drift.yaml
+notifications:
+  - name: ntf-ascender-drift
+    type: ascender                     # webhook | ascender | awx
+    events: [drift_detected]
+    applications: [isilon-prod]        # empty = every application
+    ascender:
+      url: "https://ascender.example.com"
+      job_template: 123
+      credentials: [cred-ascender-jt123]   # its token is the template's webhook key
+```
 
 ## Desired-state files
 
