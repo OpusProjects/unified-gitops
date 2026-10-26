@@ -28,8 +28,8 @@ pub struct Catalog<'a> {
     pub applications: &'a HashMap<String, Application>,
     pub connectors: &'a HashMap<String, Connector>,
     pub projects: &'a HashMap<String, GitProject>,
-    pub notifications: &'a HashMap<String, crate::domain::notification::Notification>,
-    // server.url, for links in notifications.
+    pub webhooks: &'a HashMap<String, crate::domain::webhook::Webhook>,
+    // server.url, for links in webhooks.
     pub url: Option<&'a str>,
 }
 
@@ -48,8 +48,8 @@ pub struct Reconciler<'a> {
     pub project_health: &'a SyncHealthRegistry,
     // What each connector last described, for search.
     pub described: &'a crate::domain::connector::DescribedKinds,
-    // Queues what a run has to tell (application::notify).
-    pub notifier: &'a crate::application::notify::Dispatcher,
+    // Queues what a run has to tell (application::webhooks).
+    pub dispatcher: &'a crate::application::webhooks::Dispatcher,
 }
 
 // Pull the application's project, then reconcile. What every run should do —
@@ -125,6 +125,7 @@ pub async fn reconcile(
         .read_owned()
         .await;
     let revision = r.git.revision(&checkout).await;
+    let tree = r.git.tree(&checkout, app.folder()).await;
     let record = reconcile_tree(
         r,
         catalog,
@@ -132,7 +133,7 @@ pub async fn reconcile(
         app,
         &checkout,
         Some(reading),
-        revision,
+        (revision, tree),
         mode,
         trigger,
     )
@@ -189,7 +190,9 @@ pub async fn rollback(
         app,
         &tree,
         None,
-        Some(sha.clone()),
+        // An exported folder: no tree to compare drift with, and a rollback
+        // is never measured against anyway.
+        (Some(sha.clone()), None),
         RunMode::Apply,
         Trigger::Rollback,
     )
@@ -255,7 +258,8 @@ async fn export_tree(
     let _fetching = lock.write().await;
     // Bounded like a pull: fetching history from a remote that never
     // answers must not hold the application's lock forever.
-    let sha = tokio::time::timeout(
+    let started = std::time::Instant::now();
+    let fetched = tokio::time::timeout(
         std::time::Duration::from_secs(project.timeout_seconds),
         r.git.export(
             &checkout,
@@ -272,9 +276,15 @@ async fn export_tree(
             "reading commit {revision} took longer than {} s",
             project.timeout_seconds
         )
-    })?
-    .map_err(|e| e.message)?;
-    Ok((exported, sha))
+    })
+    .and_then(|r| r.map_err(|e| e.message));
+    crate::application::projects::count_git_request(
+        &app.project,
+        "fetch",
+        fetched.is_ok(),
+        started,
+    );
+    Ok((exported, fetched?))
 }
 
 // What a rollback to `revision` would change, without changing anything:
@@ -302,6 +312,7 @@ pub async fn preview_rollback(
         started_at: now(),
         finished_at: now(),
         revision: Some(sha.clone()),
+        tree: None,
         planned: 0,
         operations: Vec::new(),
         applied: Vec::new(),
@@ -333,7 +344,8 @@ async fn reconcile_tree(
     app: &Application,
     checkout: &Path,
     reading: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
-    revision: Option<String>,
+    // The commit and the folder's tree read (GitPort::revision, ::tree).
+    (revision, tree): (Option<String>, Option<String>),
     mode: RunMode,
     trigger: Trigger,
 ) -> RunRecord {
@@ -346,6 +358,7 @@ async fn reconcile_tree(
         started_at,
         finished_at: started_at,
         revision: revision.clone(),
+        tree,
         planned: 0,
         operations: Vec::new(),
         applied: Vec::new(),
@@ -390,13 +403,14 @@ async fn reconcile_tree(
         _ => r.health.record_success(app_id),
     }
     // Where it stood before this run, read before the run is recorded over it.
-    let before = r.states.baseline(app_id);
+    let mut before = r.states.baseline(app_id);
+    before.rolled_back = r.store.rollback(app_id).is_some();
     r.states.record(app_id, status, snapshot, record.clone());
-    if let Some(detected) = crate::application::notify::detect(&before, &record, status) {
-        crate::application::notify::after_run(
-            r.notifier,
-            catalog.notifications,
-            &crate::application::notify::RunOutcome {
+    if let Some(detected) = crate::application::webhooks::detect(&before, &record, status) {
+        crate::application::webhooks::after_run(
+            r.dispatcher,
+            catalog.webhooks,
+            &crate::application::webhooks::RunOutcome {
                 application: app_id,
                 description: app.description.as_deref(),
                 base_url: catalog.url,

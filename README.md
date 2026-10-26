@@ -27,7 +27,7 @@ network, and a change made by hand on a system shows up as drift.
 - **Self-describing connectors**: a script says what it manages, each type's key and what goes first
 - **One application, one system**: its address and credentials live in config, never in git
 - **Run history**: which commit was applied, when, and the result of every operation
-- **Notifications**: drift, applied commits and failures to a webhook or an Ascender or AWX job
+- **Webhooks**: drift, applied commits and failures to a webhook or an Ascender or AWX job
 - **Config as code**: one item per file, any folders; `name` is the identity
 - **Strict validation**: a typo in desired state or config fails before any system is touched
 - **Web UI and LDAP sign-in**: the same UI family and sign-in as unified-api, on its own address
@@ -42,7 +42,7 @@ network, and a change made by hand on a system shows up as drift.
 | [How it works](docs/how-it-works.md)      | The reconcile loop: pull, list, diff, apply, and what each status means |
 | [Connectors](docs/connectors.md)                | The script contract, the Python SDK, and writing a connector               |
 | [Configuration](docs/configuration.md)    | Every YAML file field by field, and desired-state files                 |
-| [Notifications](docs/notifications.md)    | Drift, syncs and failures to a webhook or an Ascender or AWX job template |
+| [Webhooks](docs/webhooks.md)    | Drift, syncs and failures to a webhook or an Ascender or AWX job template |
 | [API](docs/api.md)                        | All routes with authentication and examples                            |
 | [Architecture](docs/architecture.md)      | The layers, the dependency rule, and what is shared with unified-api   |
 | [Configuration API](docs/config-api.md)   | Pushing the config directory over HTTP and reloading it live            |

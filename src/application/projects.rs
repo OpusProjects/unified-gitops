@@ -92,7 +92,13 @@ async fn run(
     // never answers used to hang this future — and with it whatever awaited
     // the sync. Dropping the future on timeout kills the git child
     // (kill_on_drop in the adapter), so nothing keeps running behind our back.
-    match tokio::time::timeout(
+    let operation = if dir.join(".git").exists() {
+        "pull"
+    } else {
+        "clone"
+    };
+    let started = std::time::Instant::now();
+    let pulled = match tokio::time::timeout(
         std::time::Duration::from_secs(project.timeout_seconds),
         git.ensure(&dir, project, &credentials),
     )
@@ -103,7 +109,9 @@ async fn run(
             "git operation timed out after {}s",
             project.timeout_seconds
         )),
-    }?;
+    };
+    count_git_request(project_id, operation, pulled.is_ok(), started);
+    pulled?;
 
     if !project.python_venv {
         return Ok(());
@@ -131,6 +139,32 @@ async fn run(
             project.timeout_seconds
         )),
     }
+}
+
+// Every request this instance makes to a git server, as count_call in
+// application::reconcile counts those to the systems: a clone or a pull per
+// project, and the fetch a rollback makes (application::reconcile). What the
+// Overview's repositories chart reads.
+pub fn count_git_request(
+    project_id: &str,
+    operation: &'static str,
+    ok: bool,
+    started: std::time::Instant,
+) {
+    let outcome = if ok { "success" } else { "error" };
+    metrics::counter!(
+        "unified_gitops_git_requests_total",
+        "project" => project_id.to_string(),
+        "operation" => operation,
+        "outcome" => outcome
+    )
+    .increment(1);
+    metrics::histogram!(
+        "unified_gitops_git_request_duration_seconds",
+        "project" => project_id.to_string(),
+        "operation" => operation
+    )
+    .record(started.elapsed().as_secs_f64());
 }
 
 #[cfg(test)]

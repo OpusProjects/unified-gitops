@@ -108,6 +108,10 @@ pub struct RunRecord {
     pub finished_at: u64,
     // The commit of the checkout the run read; None when it could not tell.
     pub revision: Option<String>,
+    // The git tree of the application's folder at that commit (GitPort::tree):
+    // what webhooks compare to tell drift from a commit. Not part of the API.
+    #[serde(skip)]
+    pub tree: Option<String>,
     // Operations the plan found.
     pub planned: usize,
     // Those operations themselves, each with its fields' old and new values,
@@ -175,16 +179,20 @@ pub const RECORDED_ERRORS: usize = 50;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Baseline {
     pub status: SyncStatus,
-    pub synced_revision: Option<String>,
+    pub synced_tree: Option<String>,
+    // Rolled back: checks compare the system with HEAD on purpose, and what
+    // they find is the rollback, not news. Set by the caller, from the store.
+    pub rolled_back: bool,
 }
 
 #[derive(Default)]
 struct Entry {
     status: Option<SyncStatus>,
     revision: Option<String>,
-    // The commit the application was last found in sync at. Differences found
-    // at that same commit were made outside git: drift (application::notify).
-    synced_revision: Option<String>,
+    // The tree of its folder when the application was last found in sync
+    // (RunRecord::tree). Differences found with that same tree were made
+    // outside git: drift (application::webhooks).
+    synced_tree: Option<String>,
     plan: Option<PlanSnapshot>,
     history: VecDeque<RunRecord>,
 }
@@ -221,8 +229,10 @@ impl AppStateRegistry {
         if run.revision.is_some() {
             entry.revision = run.revision.clone();
         }
-        if status == SyncStatus::Synced && run.revision.is_some() {
-            entry.synced_revision = run.revision.clone();
+        // A rollback puts an older state on the system on purpose: it is not
+        // what git says, so it never becomes what drift is measured against.
+        if status == SyncStatus::Synced && run.trigger != Trigger::Rollback && run.tree.is_some() {
+            entry.synced_tree = run.tree.clone();
         }
         if plan.is_some() {
             entry.plan = plan;
@@ -249,18 +259,20 @@ impl AppStateRegistry {
         }
     }
 
-    // Where the application stood before a run: what notifications compare
+    // Where the application stood before a run: what webhooks compare
     // the run's outcome with.
     pub fn baseline(&self, app_id: &str) -> Baseline {
         let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         match entries.get(app_id) {
             Some(e) => Baseline {
                 status: e.status.unwrap_or(SyncStatus::Unknown),
-                synced_revision: e.synced_revision.clone(),
+                synced_tree: e.synced_tree.clone(),
+                rolled_back: false,
             },
             None => Baseline {
                 status: SyncStatus::Unknown,
-                synced_revision: None,
+                synced_tree: None,
+                rolled_back: false,
             },
         }
     }
@@ -295,6 +307,7 @@ mod tests {
             started_at: 0,
             finished_at: 0,
             revision: None,
+            tree: None,
             planned: 10_000,
             operations: Vec::new(),
             applied: (0..10_000)

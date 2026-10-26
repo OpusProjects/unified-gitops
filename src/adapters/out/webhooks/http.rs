@@ -1,4 +1,6 @@
-use crate::ports::notifier::{HttpSenderPort, OutboundRequest, OutboundResponse, SendFuture};
+use crate::ports::http_sender::{
+    HttpSenderPort, OutboundRequest, OutboundResponse, SendError, SendFuture,
+};
 
 // How much of an answer is kept: a receiver's error message or a job id, not
 // whatever page a misconfigured URL returns.
@@ -31,8 +33,11 @@ impl Default for ReqwestSender {
 impl HttpSenderPort for ReqwestSender {
     fn send(&self, request: OutboundRequest) -> SendFuture<'_> {
         Box::pin(async move {
-            let method = reqwest::Method::from_bytes(request.method.as_bytes())
-                .map_err(|e| format!("method {}: {e}", request.method))?;
+            let method =
+                reqwest::Method::from_bytes(request.method.as_bytes()).map_err(|e| SendError {
+                    message: format!("method {}: {e}", request.method),
+                    retryable: false,
+                })?;
             let mut builder = self
                 .client
                 .request(method, &request.url)
@@ -42,7 +47,11 @@ impl HttpSenderPort for ReqwestSender {
                 builder = builder.header(name, value);
             }
             // The error's text, never the request: its headers carry the credential.
-            let response = builder.send().await.map_err(|e| without_url(&e))?;
+            let response = builder.send().await.map_err(|e| SendError {
+                message: without_url(&e),
+                // Not buildable (a malformed URL or header): the same next time.
+                retryable: !e.is_builder(),
+            })?;
             let status = response.status().as_u16();
             let bytes = response.bytes().await.unwrap_or_default();
             let kept = &bytes[..bytes.len().min(KEPT_BODY_BYTES)];

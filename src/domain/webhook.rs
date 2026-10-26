@@ -3,36 +3,79 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-// A notification: which events, from which applications, and where they go.
+// A webhook: which events, from which applications, and where they go.
 // The `type` names the receiver; its settings live in the block of the same
 // name (`webhook:`, `ascender:`, `awx:`), so a block that belongs to another
 // type is a load error rather than settings silently ignored, and adding a
 // type later is a new block, with nothing to rename.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Notification {
+pub struct Webhook {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(rename = "type")]
-    pub notification_type: NotificationType,
+    pub webhook_type: WebhookType,
     pub events: Vec<Event>,
-    // Empty = every application.
+    // `all`, or the applications by name. Left out or `[]`: none, as an API
+    // key or an LDAP rule with no applications reaches none.
     #[serde(default)]
-    pub applications: Vec<String>,
+    pub applications: Applications,
     #[serde(default)]
-    pub webhook: Option<WebhookTarget>,
+    pub webhook: Option<HttpTarget>,
     #[serde(default)]
     pub ascender: Option<JobTemplateTarget>,
     #[serde(default)]
     pub awx: Option<JobTemplateTarget>,
 }
 
+// Which applications a webhook listens to: the word `all`, or a list.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum Applications {
+    All(AllWord),
+    Named(Vec<String>),
+}
+
+// The one word `applications:` takes instead of a list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllWord {
+    All,
+}
+
+impl Default for Applications {
+    fn default() -> Self {
+        Applications::Named(Vec::new())
+    }
+}
+
+impl Applications {
+    pub fn is_all(&self) -> bool {
+        matches!(self, Applications::All(_))
+    }
+
+    // The applications named; empty for `all`.
+    pub fn named(&self) -> &[String] {
+        match self {
+            Applications::All(_) => &[],
+            Applications::Named(names) => names,
+        }
+    }
+
+    pub fn includes(&self, application: &str) -> bool {
+        match self {
+            Applications::All(_) => true,
+            Applications::Named(names) => names.iter().any(|a| a == application),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum NotificationType {
+pub enum WebhookType {
     // Any HTTP receiver: its URL, method, headers, body and authentication.
     Webhook,
-    // A job template in Ascender, through its webhook receiver or its launch API.
+    // A job template in Ascender, through its own webhook receiver.
     Ascender,
     // The same in AWX. The routes are Ascender's today; they are separate
     // types so neither carries the other's name, and either can follow its
@@ -40,18 +83,18 @@ pub enum NotificationType {
     Awx,
 }
 
-impl NotificationType {
+impl WebhookType {
     pub fn as_str(self) -> &'static str {
         match self {
-            NotificationType::Webhook => "webhook",
-            NotificationType::Ascender => "ascender",
-            NotificationType::Awx => "awx",
+            WebhookType::Webhook => "webhook",
+            WebhookType::Ascender => "ascender",
+            WebhookType::Awx => "awx",
         }
     }
 }
 
-// What happened to an application, as a notification names it. One run
-// produces at most one event (application::notify::detect).
+// What happened to an application, as a webhook names it. One run
+// produces at most one event (application::webhooks::detect).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Event {
@@ -82,7 +125,7 @@ impl Event {
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WebhookTarget {
+pub struct HttpTarget {
     pub url: String,
     #[serde(default = "default_method")]
     pub method: String,
@@ -112,14 +155,21 @@ pub struct WebhookTarget {
 #[serde(untagged)]
 pub enum Auth {
     Scheme(AuthScheme),
-    Header {
-        header: String,
-    },
+    Header(HeaderAuth),
     // `auth:` left out: a bearer token when there is a credential, nothing
     // when there is none.
     #[default]
     #[serde(skip)]
     Default,
+}
+
+// `auth: {header: Name}`: the credential's token in a header of that name.
+// Strict like every other block: `{header: X, value: y}` is a typo, not a
+// setting to ignore.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeaderAuth {
+    pub header: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -146,7 +196,10 @@ pub struct Signing {
     pub secret_field: String,
 }
 
-// A job template (or workflow job template) to start, in Ascender or AWX.
+// A job template (or workflow job template) to start, in Ascender or AWX,
+// through the template's own webhook receiver in GitLab mode: its key in
+// X-Gitlab-Token, no user needed, and any event accepted. The playbook reads
+// the message as <prefix>_webhook_payload (ascender_, awx_ or tower_).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobTemplateTarget {
@@ -156,41 +209,13 @@ pub struct JobTemplateTarget {
     pub job_template: Option<u64>,
     #[serde(default)]
     pub workflow_job_template: Option<u64>,
-    #[serde(default)]
-    pub trigger: JobTrigger,
-    // `webhook`: one credential whose `token` is the template's webhook key.
-    // `launch`: one credential whose `token` is a user's OAuth token.
+    // One credential, whose `token` is the template's webhook key.
     #[serde(default)]
     pub credentials: Vec<String>,
-    // `launch` only: variables sent beside the event, which arrives as
-    // `unified_gitops`. The template must prompt for variables on launch.
-    #[serde(default)]
-    pub extra_vars: serde_json::Map<String, serde_json::Value>,
     #[serde(default = "default_timeout_seconds")]
     pub timeout_seconds: u64,
     #[serde(default = "default_retries")]
     pub retries: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ToSchema, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum JobTrigger {
-    // The template's own webhook receiver, in GitLab mode: its key in
-    // X-Gitlab-Token, no user needed. The playbook reads the event as
-    // `<prefix>_webhook_payload`.
-    #[default]
-    Webhook,
-    // POST .../launch/ as a user, with extra_vars.
-    Launch,
-}
-
-impl JobTrigger {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            JobTrigger::Webhook => "webhook",
-            JobTrigger::Launch => "launch",
-        }
-    }
 }
 
 fn default_method() -> String {
@@ -234,22 +259,22 @@ pub const TEMPLATE_FIELDS: [&str; 15] = [
     "errors",
     "at",
     "url",
-    "notification",
+    "webhook",
 ];
 
 const METHODS: [&str; 3] = ["POST", "PUT", "PATCH"];
 
 // Longest a send may take: a receiver that never answers must not hold the
-// sender (and every notification queued behind it) for long.
+// sender (and every webhook queued behind it) for long.
 const MAX_TIMEOUT_SECONDS: u64 = 300;
 const MAX_RETRIES: u32 = 10;
 
-impl Notification {
+impl Webhook {
     // Everything wrong with this item on its own; references to applications
     // and credentials are checked by the loader, which knows them.
     pub fn errors(&self, id: &str) -> Vec<String> {
         let mut errors = Vec::new();
-        let at = |what: String| format!("Notification '{id}': {what}");
+        let at = |what: String| format!("Webhook '{id}': {what}");
         if self.events.is_empty() {
             errors.push(at("needs at least one event".to_string()));
         }
@@ -258,7 +283,7 @@ impl Notification {
             ("ascender", self.ascender.is_some()),
             ("awx", self.awx.is_some()),
         ];
-        let wanted = self.notification_type.as_str();
+        let wanted = self.webhook_type.as_str();
         for (block, present) in blocks {
             if block == wanted && !present {
                 errors.push(at(format!("type {wanted} needs a '{wanted}:' block")));
@@ -278,7 +303,7 @@ impl Notification {
         errors
     }
 
-    // The credentials this notification names, whichever its type.
+    // The credentials this webhook names, whichever its type.
     pub fn credentials(&self) -> &[String] {
         if let Some(webhook) = &self.webhook {
             return &webhook.credentials;
@@ -289,10 +314,9 @@ impl Notification {
         }
     }
 
-    // Whether this notification wants `event` from `application`.
+    // Whether this webhook wants `event` from `application`.
     pub fn wants(&self, event: Event, application: &str) -> bool {
-        self.events.contains(&event)
-            && (self.applications.is_empty() || self.applications.iter().any(|a| a == application))
+        self.events.contains(&event) && self.applications.includes(application)
     }
 
     // Where it sends, without anything a URL can carry that is secret: a
@@ -307,7 +331,7 @@ impl Notification {
     }
 }
 
-impl WebhookTarget {
+impl HttpTarget {
     fn errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
         errors.extend(url_errors("webhook.url", &self.url));
@@ -322,13 +346,13 @@ impl WebhookTarget {
             errors.extend(template_errors(body));
         }
         let needs_credential = match &self.auth {
-            Auth::Scheme(AuthScheme::Bearer | AuthScheme::Basic) | Auth::Header { .. } => true,
+            Auth::Scheme(AuthScheme::Bearer | AuthScheme::Basic) | Auth::Header(_) => true,
             Auth::Scheme(AuthScheme::None) | Auth::Default => false,
         };
         if needs_credential && self.credentials.is_empty() {
             errors.push("webhook.auth needs a credential in webhook.credentials".to_string());
         }
-        if let Auth::Header { header } = &self.auth
+        if let Auth::Header(HeaderAuth { header }) = &self.auth
             && !is_header_name(header)
         {
             errors.push(format!(
@@ -351,6 +375,37 @@ impl WebhookTarget {
                 errors.push("webhook.sign needs a credential holding its secret".to_string());
             }
         }
+        // One header, one source: a fixed header with the name the auth or
+        // the signature writes would be sent twice.
+        let mut written: Vec<(&str, &str)> = Vec::new();
+        match &self.auth {
+            Auth::Scheme(AuthScheme::Bearer | AuthScheme::Basic) => {
+                written.push(("Authorization", "webhook.auth"))
+            }
+            Auth::Default if !self.credentials.is_empty() => {
+                written.push(("Authorization", "webhook.auth"))
+            }
+            Auth::Header(HeaderAuth { header }) => written.push((header, "webhook.auth")),
+            _ => {}
+        }
+        if let Some(sign) = &self.sign {
+            written.push((&sign.header, "webhook.sign"));
+        }
+        for (i, (name, by)) in written.iter().enumerate() {
+            if self.headers.keys().any(|h| h.eq_ignore_ascii_case(name)) {
+                errors.push(format!(
+                    "webhook.headers sets '{name}', which {by} writes: set it in one place"
+                ));
+            }
+            if written[..i]
+                .iter()
+                .any(|(other, _)| other.eq_ignore_ascii_case(name))
+            {
+                errors.push(format!(
+                    "webhook.auth and webhook.sign both write '{name}': give them different headers"
+                ));
+            }
+        }
         errors.extend(bounds_errors("webhook", self.timeout_seconds, self.retries));
         errors
     }
@@ -362,8 +417,8 @@ impl JobTemplateTarget {
         errors.extend(url_errors("url", &self.url));
         if self.url.trim_end_matches('/').ends_with("/api") || self.url.contains("/api/v2") {
             errors.push(format!(
-                "url '{}' is the controller's address, without /api",
-                self.url
+                "url '{}…' is the controller's address, without /api",
+                origin(&self.url)
             ));
         }
         match (self.job_template, self.workflow_job_template) {
@@ -376,18 +431,8 @@ impl JobTemplateTarget {
             _ => {}
         }
         if self.credentials.len() != 1 {
-            errors.push(format!(
-                "trigger {} needs exactly one credential, whose token is {}",
-                self.trigger.as_str(),
-                match self.trigger {
-                    JobTrigger::Webhook => "the template's webhook key",
-                    JobTrigger::Launch => "a user's token",
-                }
-            ));
-        }
-        if self.trigger == JobTrigger::Webhook && !self.extra_vars.is_empty() {
             errors.push(
-                "extra_vars only go with trigger launch: a webhook sends the event itself"
+                "needs exactly one credential, whose token is the template's webhook key"
                     .to_string(),
             );
         }
@@ -399,19 +444,15 @@ impl JobTemplateTarget {
         errors
     }
 
-    // The route a send goes to.
+    // The template's webhook receiver, GitLab mode.
     pub fn endpoint(&self) -> String {
         let (collection, id) = match (self.job_template, self.workflow_job_template) {
             (Some(id), _) => ("job_templates", id),
             (None, Some(id)) => ("workflow_job_templates", id),
             (None, None) => ("job_templates", 0),
         };
-        let action = match self.trigger {
-            JobTrigger::Webhook => "gitlab",
-            JobTrigger::Launch => "launch",
-        };
         format!(
-            "{}/api/v2/{collection}/{id}/{action}/",
+            "{}/api/v2/{collection}/{id}/gitlab/",
             self.url.trim_end_matches('/')
         )
     }
@@ -456,11 +497,38 @@ fn template_errors(body: &str) -> Vec<String> {
 
 // Every {{name}} in a template, in order.
 pub fn placeholders(template: &str) -> impl Iterator<Item = &str> {
-    template.split("{{").skip(1).filter_map(|rest| {
-        rest.split_once("}}")
-            .map(|(name, _)| name.trim())
-            .filter(|name| !name.is_empty())
+    template_parts(template).filter_map(|part| match part {
+        TemplatePart::Field(name) => Some(name),
+        TemplatePart::Text(_) => None,
     })
+}
+
+// A template, split once, the same way for checking it at load and for
+// rendering it: text, and the {{field}} placeholders in it. A `{{` with no
+// `}}` after it, or with nothing between them, is text.
+pub enum TemplatePart<'a> {
+    Text(&'a str),
+    Field(&'a str),
+}
+
+pub fn template_parts(template: &str) -> impl Iterator<Item = TemplatePart<'_>> {
+    let mut pieces = template.split("{{");
+    let first = pieces.next().map(TemplatePart::Text);
+    first.into_iter().chain(pieces.flat_map(|piece| {
+        match piece.split_once("}}") {
+            Some((name, after)) if !name.trim().is_empty() => [
+                Some(TemplatePart::Field(name.trim())),
+                Some(TemplatePart::Text(after)),
+            ],
+            // Not a placeholder: the `{{` is text, and so is what follows it.
+            _ => [
+                Some(TemplatePart::Text("{{")),
+                Some(TemplatePart::Text(piece)),
+            ],
+        }
+        .into_iter()
+        .flatten()
+    }))
 }
 
 fn is_header_name(name: &str) -> bool {
@@ -487,7 +555,7 @@ pub fn origin(url: &str) -> String {
 mod tests {
     use super::*;
 
-    fn parse(yaml: &str) -> Notification {
+    fn parse(yaml: &str) -> Webhook {
         serde_saphyr::from_str(yaml).unwrap()
     }
 
@@ -519,12 +587,12 @@ mod tests {
     #[test]
     fn an_unknown_event_or_key_fails_to_parse() {
         assert!(
-            serde_saphyr::from_str::<Notification>(
+            serde_saphyr::from_str::<Webhook>(
                 "type: webhook\nevents: [drifted]\nwebhook:\n  url: https://x.example.com\n"
             )
             .is_err()
         );
-        assert!(serde_saphyr::from_str::<Notification>(
+        assert!(serde_saphyr::from_str::<Webhook>(
             "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n  token: x\n"
         )
         .is_err());
@@ -555,10 +623,20 @@ mod tests {
         );
         assert_eq!(
             header.webhook.unwrap().auth,
-            Auth::Header {
+            Auth::Header(HeaderAuth {
                 header: "X-Gitlab-Token".into()
-            }
+            })
         );
+        // Strict: a key the header form does not have is an error.
+        assert!(serde_saphyr::from_str::<Webhook>(
+            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n  credentials: [c]\n  auth: {header: X-Key, value: y}\n"
+        )
+        .is_err());
+        // One header, one source.
+        let twice = parse(
+            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n  credentials: [c]\n  headers: {authorization: x}\n",
+        );
+        assert!(twice.errors("n").join("").contains("set it in one place"));
         let missing = parse(
             "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n  auth: bearer\n",
         );
@@ -572,31 +650,31 @@ mod tests {
         );
         assert!(n.errors("n").is_empty(), "{:?}", n.errors("n"));
         let target = n.ascender.unwrap();
-        assert_eq!(target.trigger, JobTrigger::Webhook);
         assert_eq!(
             target.endpoint(),
             "https://ascender.example.com/api/v2/job_templates/7/gitlab/"
         );
 
-        let launch = parse(
-            "type: awx\nevents: [drift_detected]\nawx:\n  url: https://awx.example.com/\n  workflow_job_template: 9\n  trigger: launch\n  credentials: [t]\n",
+        let workflow = parse(
+            "type: awx\nevents: [drift_detected]\nawx:\n  url: https://awx.example.com/\n  workflow_job_template: 9\n  credentials: [k]\n",
         );
         assert_eq!(
-            launch.awx.unwrap().endpoint(),
-            "https://awx.example.com/api/v2/workflow_job_templates/9/launch/"
+            workflow.awx.unwrap().endpoint(),
+            "https://awx.example.com/api/v2/workflow_job_templates/9/gitlab/"
         );
+        // The launch API is not a way in: trigger and extra_vars are unknown keys.
+        assert!(serde_saphyr::from_str::<Webhook>(
+            "type: ascender\nevents: [drift_detected]\nascender:\n  url: https://a.example.com\n  job_template: 7\n  credentials: [k]\n  trigger: launch\n"
+        )
+        .is_err());
 
         let wrong = parse(
-            "type: ascender\nevents: [drift_detected]\nascender:\n  url: https://ascender.example.com/api/v2\n  job_template: 7\n  workflow_job_template: 8\n  extra_vars: {a: 1}\n",
+            "type: ascender\nevents: [drift_detected]\nascender:\n  url: https://ascender.example.com/api/v2\n  job_template: 7\n  workflow_job_template: 8\n",
         );
         let errors = wrong.errors("n").join("\n");
         assert!(errors.contains("without /api"), "{errors}");
         assert!(errors.contains("not both"), "{errors}");
         assert!(errors.contains("exactly one credential"), "{errors}");
-        assert!(
-            errors.contains("extra_vars only go with trigger launch"),
-            "{errors}"
-        );
     }
 
     #[test]
@@ -607,9 +685,23 @@ mod tests {
         assert!(n.wants(Event::SyncFailed, "a"));
         assert!(!n.wants(Event::SyncFailed, "b"));
         assert!(!n.wants(Event::DriftDetected, "a"));
-        let all =
-            parse("type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n");
+        let all = parse(
+            "type: webhook\nevents: [sync_failed]\napplications: all\nwebhook:\n  url: https://x.example.com\n",
+        );
+        assert!(all.applications.is_all());
         assert!(all.wants(Event::SyncFailed, "anything"));
+        // Left out or empty: none, as an API key with no applications.
+        let none =
+            parse("type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n");
+        assert!(!none.wants(Event::SyncFailed, "anything"));
+        let empty = parse(
+            "type: webhook\nevents: [sync_failed]\napplications: []\nwebhook:\n  url: https://x.example.com\n",
+        );
+        assert!(!empty.wants(Event::SyncFailed, "anything"));
+        assert!(serde_saphyr::from_str::<Webhook>(
+            "type: webhook\nevents: [sync_failed]\napplications: every\nwebhook:\n  url: https://x.example.com\n"
+        )
+        .is_err());
     }
 
     #[test]

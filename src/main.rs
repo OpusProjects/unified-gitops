@@ -16,13 +16,13 @@ async fn main() {
             Ok(cfg) => {
                 println!(
                     "configuration OK ({}): {} applications, {} connectors, \
-                     {} credentials, {} projects, {} notifications",
+                     {} credentials, {} projects, {} webhooks",
                     config_dir,
                     cfg.applications.len(),
                     cfg.connectors.len(),
                     cfg.credentials.len(),
                     cfg.projects.len(),
-                    cfg.notifications.len(),
+                    cfg.webhooks.len(),
                 );
                 return;
             }
@@ -126,9 +126,9 @@ async fn main() {
     }
 
     let (app, state) = builder.build_with_state();
-    // Sends what runs have to tell (notifications), from the first run on:
+    // Sends what runs have to tell (webhooks), from the first run on:
     // a failure of the very first check is worth knowing.
-    state.start_notifier();
+    state.start_webhooks();
 
     // One switch for every background task. Flipped after the HTTP server has
     // drained; each task returns at its next wait point (a running apply is
@@ -269,6 +269,7 @@ async fn main() {
     // shutdown_grace_seconds — for in-flight runs to finish. Past the grace
     // the process exits anyway: blocking on a wedged connector would only trade
     // a clean exit for a SIGKILL.
+    let shutdown_started = std::time::Instant::now();
     let _ = shutdown_tx.send(true);
     let handles: Vec<tokio::task::JoinHandle<()>> =
         std::mem::take(background_tasks.lock().expect("handle registry").as_mut());
@@ -289,6 +290,16 @@ async fn main() {
         );
     } else {
         info!("Background tasks drained");
+    }
+
+    // Then the webhooks those last runs queued, in what is left of the grace:
+    // a drift reverted in the very last run must still be reported.
+    let left = state
+        .dispatcher
+        .drain(grace.saturating_sub(shutdown_started.elapsed()))
+        .await;
+    if left > 0 {
+        warn!(left, "Webhook messages still unsent at shutdown — dropped");
     }
 
     info!("Shutdown complete");

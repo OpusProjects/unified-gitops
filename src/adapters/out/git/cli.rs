@@ -123,6 +123,24 @@ impl GitPort for CliGit {
         })
     }
 
+    fn tree(&self, dir: &Path, folder: &str) -> crate::ports::git::RevisionFuture<'_> {
+        let dir = dir.to_path_buf();
+        // `HEAD:` alone names the root tree.
+        let spec = format!("HEAD:{}", if folder == "." { "" } else { folder });
+        Box::pin(async move {
+            let mut cmd = Command::new("git");
+            cmd.args(["-C", dir.to_str()?, "rev-parse", &spec]);
+            cmd.env("GIT_TERMINAL_PROMPT", "0");
+            cmd.kill_on_drop(true);
+            let output = cmd.output().await.ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (!id.is_empty()).then_some(id)
+        })
+    }
+
     // `git archive` streams the tree at that commit straight from the object
     // store; `tar` unpacks it. Nothing in the checkout moves, so a pull
     // running at the same time cannot be confused by it, nor it by the pull.

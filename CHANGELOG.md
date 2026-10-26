@@ -8,7 +8,8 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Notifications: a `notifications` item sends `drift_detected`, `out_of_sync`, `sync_succeeded`, `sync_failed` and `back_in_sync` to a webhook (any receiver, with bearer, basic or header auth, a body template and optional HMAC signing) or to an Ascender or AWX job template (its webhook receiver or its launch API), one message per run, queued and retried, never with a field's value; `GET /api/v1/notifications` shows each one's last send and `POST /api/v1/notifications/{id}/test` sends a test (see `docs/notifications.md`).
+- Webhooks: a `webhooks` item sends, for `all` applications or the ones it names, `drift_detected`, `out_of_sync`, `sync_succeeded`, `sync_failed` and `back_in_sync` to a webhook (any receiver, with bearer, basic or header auth, a body template and optional HMAC signing) or to an Ascender or AWX job template (through the template's own webhook receiver, so no user is needed), one message per run, drift told apart from a commit by the application's own folder in git, queued and retried without one receiver holding up the others, its changes listed by name and never with a field's value; `GET /api/v1/webhooks` shows each one's last send, `GET /api/v1/webhooks/{id}` its last 50, and `POST /api/v1/webhooks/{id}/test` sends a test (see `docs/webhooks.md`).
+- Metrics `unified_gitops_git_requests_total{project,operation,outcome}` and `unified_gitops_git_request_duration_seconds`: every clone, pull and rollback fetch this instance makes to a git server, as `unified_gitops_connector_calls_total` counts those to the systems.
 
 ### Changed
 

@@ -9,12 +9,11 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{Semaphore, mpsc};
 use utoipa::ToSchema;
 
-use crate::domain::notification::{
-    Auth, AuthScheme, Event, JobTemplateTarget, JobTrigger, Notification, NotificationType,
-    WebhookTarget,
-};
 use crate::domain::run::{Baseline, RunMode, RunRecord, RunResult, SyncStatus, Trigger, now};
-use crate::ports::notifier::{HttpSenderPort, OutboundRequest, OutboundResponse};
+use crate::domain::webhook::{
+    Auth, AuthScheme, Event, HttpTarget, JobTemplateTarget, Webhook, WebhookType,
+};
+use crate::ports::http_sender::{HttpSenderPort, OutboundRequest, OutboundResponse, SendError};
 use crate::ports::secrets::SecretsPort;
 
 // The use case "tell someone what happened to an application".
@@ -22,7 +21,7 @@ use crate::ports::secrets::SecretsPort;
 // After every run, `detect` compares where the application stood before it
 // (its Baseline) with what the run found and did, and names at most one
 // event: one message per run, never "drift" and "synced" for the same
-// change. Notifications that want that event are queued; a worker sends
+// change. Webhooks that want that event are queued; a worker sends
 // them, so a slow receiver never holds up a run.
 
 // Why a sync changed something.
@@ -69,11 +68,20 @@ impl Detected {
 // state is entered, not on every check that finds it still there; events that
 // describe something done (sync_succeeded, a reverted drift) fire every time.
 //
+// Drift and commits are told apart by the tree of the application's own
+// folder (RunRecord::tree), not by the repository's commit: a commit to
+// another application's folder changes nothing here. With no tree to compare
+// (the checkout is not git, or git could not answer), the cause is unknown.
+//
 // A baseline of Unknown (first run since the process started: history is in
 // memory) fires only failures and applied changes, so a restart does not
-// report every pending difference again.
+// report every pending difference again. While a rollback stands, scheduled
+// checks report only failures: they compare the system with HEAD on purpose,
+// and what they find is the rollback.
 pub fn detect(before: &Baseline, record: &RunRecord, status: SyncStatus) -> Option<Detected> {
-    let at_synced_commit = record.revision.is_some() && record.revision == before.synced_revision;
+    let known = record.tree.is_some();
+    let unchanged_in_git = known && record.tree == before.synced_tree;
+    let entered = matches!(before.status, SyncStatus::Synced | SyncStatus::Failed);
 
     if matches!(record.result, RunResult::Failed | RunResult::Partial)
         || status == SyncStatus::Failed
@@ -82,26 +90,34 @@ pub fn detect(before: &Baseline, record: &RunRecord, status: SyncStatus) -> Opti
             .then(|| Detected::new(Event::SyncFailed, None, None));
     }
 
+    if before.rolled_back && record.trigger == Trigger::Schedule {
+        return None;
+    }
+
     let applied = record.applied.iter().filter(|a| a.ok).count();
     if record.mode == RunMode::Apply && applied > 0 {
         let cause = if record.trigger == Trigger::Rollback {
-            Cause::Rollback
-        } else if at_synced_commit {
-            Cause::Drift
+            Some(Cause::Rollback)
+        } else if unchanged_in_git {
+            Some(Cause::Drift)
+        } else if known {
+            Some(Cause::Commit)
         } else {
-            Cause::Commit
+            None
         };
         return Some(match cause {
-            Cause::Drift => Detected::new(Event::DriftDetected, Some(cause), Some(true)),
-            _ => Detected::new(Event::SyncSucceeded, Some(cause), None),
+            Some(Cause::Drift) => Detected::new(Event::DriftDetected, cause, Some(true)),
+            _ => Detected::new(Event::SyncSucceeded, cause, None),
         });
     }
 
     match status {
-        SyncStatus::OutOfSync if at_synced_commit => (before.status == SyncStatus::Synced)
-            .then(|| Detected::new(Event::DriftDetected, Some(Cause::Drift), Some(false))),
-        SyncStatus::OutOfSync => matches!(before.status, SyncStatus::Synced | SyncStatus::Failed)
-            .then(|| Detected::new(Event::OutOfSync, Some(Cause::Commit), None)),
+        SyncStatus::OutOfSync if unchanged_in_git => {
+            entered.then(|| Detected::new(Event::DriftDetected, Some(Cause::Drift), Some(false)))
+        }
+        SyncStatus::OutOfSync => {
+            entered.then(|| Detected::new(Event::OutOfSync, known.then_some(Cause::Commit), None))
+        }
         SyncStatus::Synced => matches!(before.status, SyncStatus::Failed | SyncStatus::OutOfSync)
             .then(|| Detected::new(Event::BackInSync, None, None)),
         _ => None,
@@ -199,13 +215,13 @@ pub fn message(o: &RunOutcome<'_>) -> Map<String, Value> {
 }
 
 // The message a "Send test" sends: the real shape, marked as a test.
-pub fn test_message(notification_id: &str, base_url: Option<&str>) -> Map<String, Value> {
+pub fn test_message(webhook_id: &str, base_url: Option<&str>) -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("event".into(), json!("test"));
     m.insert("application".into(), Value::Null);
     m.insert(
         "description".into(),
-        json!(format!("Test of notification {notification_id}")),
+        json!(format!("Test of webhook {webhook_id}")),
     );
     for key in [
         "status",
@@ -237,22 +253,26 @@ fn rfc3339(unix_seconds: u64) -> String {
 // a JSON string (the template writes the quotes); lists, numbers and
 // booleans as JSON; an absent value as nothing.
 pub fn render(template: &str, message: &Map<String, Value>) -> String {
+    use crate::domain::webhook::{TemplatePart, template_parts};
+    let parts: Vec<TemplatePart<'_>> = template_parts(template).collect();
     let mut out = String::with_capacity(template.len());
-    let mut rest = template;
-    while let Some(start) = rest.find("{{") {
-        let Some(len) = rest[start + 2..].find("}}") else {
-            break;
-        };
-        out.push_str(&rest[..start]);
-        let name = rest[start + 2..start + 2 + len].trim();
-        out.push_str(&placeholder_value(name, message));
-        rest = &rest[start + 2 + len + 2..];
+    for (i, part) in parts.iter().enumerate() {
+        match part {
+            TemplatePart::Text(text) => out.push_str(text),
+            TemplatePart::Field(name) => {
+                // Inside quotes, an absent value is an empty string; outside
+                // them, JSON's null, so `{"reverted": {{reverted}}}` stays
+                // valid when there is nothing to say.
+                let quoted = out.ends_with('"')
+                    && matches!(parts.get(i + 1), Some(TemplatePart::Text(t)) if t.starts_with('"'));
+                out.push_str(&placeholder_value(name, message, quoted));
+            }
+        }
     }
-    out.push_str(rest);
     out
 }
 
-fn placeholder_value(name: &str, message: &Map<String, Value>) -> String {
+fn placeholder_value(name: &str, message: &Map<String, Value>, quoted: bool) -> String {
     let value = if name == "revision_short" {
         message
             .get("revision")
@@ -263,7 +283,8 @@ fn placeholder_value(name: &str, message: &Map<String, Value>) -> String {
         message.get(name).cloned().unwrap_or(Value::Null)
     };
     match value {
-        Value::Null => String::new(),
+        Value::Null if quoted => String::new(),
+        Value::Null => "null".to_string(),
         Value::String(s) => {
             let quoted = Value::String(s).to_string();
             quoted[1..quoted.len() - 1].to_string()
@@ -272,27 +293,27 @@ fn placeholder_value(name: &str, message: &Map<String, Value>) -> String {
     }
 }
 
-// The request one notification sends for one message. Pure: the credentials
+// The request one webhook sends for one message. Pure: the credentials
 // arrive resolved, and nothing here touches the network.
 pub fn build_request(
-    notification: &Notification,
+    webhook: &Webhook,
     message: &Map<String, Value>,
     credentials: &HashMap<String, String>,
 ) -> Result<OutboundRequest, String> {
-    match notification.notification_type {
-        NotificationType::Webhook => {
-            let target = notification
+    match webhook.webhook_type {
+        WebhookType::Webhook => {
+            let target = webhook
                 .webhook
                 .as_ref()
                 .ok_or("type webhook needs a 'webhook:' block")?;
             webhook_request(target, message, credentials)
         }
-        NotificationType::Ascender | NotificationType::Awx => {
-            let target = notification
+        WebhookType::Ascender | WebhookType::Awx => {
+            let target = webhook
                 .ascender
                 .as_ref()
-                .or(notification.awx.as_ref())
-                .ok_or("a job template notification needs its block")?;
+                .or(webhook.awx.as_ref())
+                .ok_or("a job template webhook needs its block")?;
             job_template_request(target, message, credentials)
         }
     }
@@ -317,8 +338,30 @@ fn field<'a>(credentials: &'a HashMap<String, String>, name: &str) -> Result<&'a
         .ok_or_else(|| format!("the credential has no '{name}' field"))
 }
 
+// Sets a header, replacing any of the same name (headers are not case
+// sensitive): one header, one value.
+fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
+    headers.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+    headers.push((name.to_string(), value));
+}
+
+// A header value HTTP can carry: no line breaks or other control characters,
+// which a secret read from a file often ends with. Refused here, before the
+// request: it is the configuration's to fix, and retrying would not.
+fn check_headers(headers: &[(String, String)]) -> Result<(), String> {
+    for (name, value) in headers {
+        if value.chars().any(|c| c.is_control() && c != '\t') {
+            return Err(format!(
+                "the value for header '{name}' has a line break or a control character \
+                 (a credential read from a file with a trailing newline?)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn webhook_request(
-    target: &WebhookTarget,
+    target: &HttpTarget,
     message: &Map<String, Value>,
     credentials: &HashMap<String, String>,
 ) -> Result<OutboundRequest, String> {
@@ -333,42 +376,52 @@ fn webhook_request(
         headers.push((name.clone(), value.clone()));
     }
     match &target.auth {
-        Auth::Scheme(AuthScheme::Bearer) => headers.push((
-            "Authorization".into(),
+        Auth::Scheme(AuthScheme::Bearer) => set_header(
+            &mut headers,
+            "Authorization",
             format!("Bearer {}", field(credentials, "token")?),
-        )),
+        ),
         Auth::Default => {
             if let Some(token) = credentials.get("token").filter(|t| !t.is_empty()) {
-                headers.push(("Authorization".into(), format!("Bearer {token}")));
+                set_header(&mut headers, "Authorization", format!("Bearer {token}"));
             }
         }
         Auth::Scheme(AuthScheme::Basic) => {
-            let pair = format!(
-                "{}:{}",
-                field(credentials, "username")?,
-                field(credentials, "password")?
-            );
-            headers.push((
-                "Authorization".into(),
+            // An empty password is allowed: some APIs take a key as the
+            // username and nothing after the colon.
+            let password = credentials
+                .get("password")
+                .map(String::as_str)
+                .unwrap_or("");
+            let pair = format!("{}:{password}", field(credentials, "username")?);
+            set_header(
+                &mut headers,
+                "Authorization",
                 format!(
                     "Basic {}",
                     base64::engine::general_purpose::STANDARD.encode(pair)
                 ),
-            ));
+            );
         }
-        Auth::Header { header } => {
-            headers.push((header.clone(), field(credentials, "token")?.to_string()));
+        Auth::Header(crate::domain::webhook::HeaderAuth { header }) => {
+            set_header(
+                &mut headers,
+                header,
+                field(credentials, "token")?.to_string(),
+            );
         }
         Auth::Scheme(AuthScheme::None) => {}
     }
     if let Some(sign) = &target.sign {
         let secret = field(credentials, &sign.secret_field)?;
         let digest = hmac_sha256(secret.as_bytes(), &body);
-        headers.push((
-            sign.header.clone(),
+        set_header(
+            &mut headers,
+            &sign.header,
             format!("{}{}", sign.prefix, hex(&digest)),
-        ));
+        );
     }
+    check_headers(&headers)?;
     Ok(OutboundRequest {
         method: target.method.clone(),
         url: target.url.clone(),
@@ -378,10 +431,9 @@ fn webhook_request(
     })
 }
 
-// Ascender and AWX speak the same routes. `webhook` posts the message to the
-// template's own receiver in GitLab mode (its key, compared as is, and any
-// event name; the playbook reads the message as <prefix>_webhook_payload).
-// `launch` starts it as a user, the message under extra_vars.unified_gitops.
+// Ascender and AWX speak the same routes: the message goes to the template's
+// own receiver in GitLab mode (its key, compared as is, and any event name;
+// the playbook reads the message as <prefix>_webhook_payload).
 fn job_template_request(
     target: &JobTemplateTarget,
     message: &Map<String, Value>,
@@ -390,75 +442,35 @@ fn job_template_request(
     let token = field(credentials, "token")?;
     let event = message.get("event").and_then(Value::as_str).unwrap_or("");
     let mut headers = base_headers(event);
-    let body = match target.trigger {
-        JobTrigger::Webhook => {
-            headers.push(("X-Gitlab-Token".into(), token.to_string()));
-            headers.push(("X-Gitlab-Event".into(), format!("unified-gitops {event}")));
-            serde_json::to_vec(message).map_err(|e| e.to_string())?
-        }
-        JobTrigger::Launch => {
-            headers.push(("Authorization".into(), format!("Bearer {token}")));
-            let mut extra_vars = target.extra_vars.clone();
-            extra_vars.insert("unified_gitops".into(), Value::Object(message.clone()));
-            serde_json::to_vec(&json!({ "extra_vars": extra_vars })).map_err(|e| e.to_string())?
-        }
-    };
+    headers.push(("X-Gitlab-Token".into(), token.to_string()));
+    headers.push(("X-Gitlab-Event".into(), format!("unified-gitops {event}")));
+    check_headers(&headers)?;
     Ok(OutboundRequest {
         method: "POST".into(),
         url: target.endpoint(),
         headers,
-        body,
+        body: serde_json::to_vec(message).map_err(|e| e.to_string())?,
         timeout: Duration::from_secs(target.timeout_seconds),
     })
 }
 
-// What an answer means for this receiver: Ok with the job it started, if it
-// says; Err with why it did not do what was asked.
-pub fn interpret(
-    notification: &Notification,
-    response: &OutboundResponse,
-) -> Result<Option<String>, String> {
-    if !(200..300).contains(&response.status) {
-        let excerpt: String = response.body.chars().take(300).collect();
-        return Err(format!("HTTP {}: {}", response.status, excerpt.trim()));
+// What an answer means: any 2xx is taken (a controller answers 202, "Job
+// queued.", or the same for a message it already had); anything else is why
+// it was not, with the start of what the receiver said.
+pub fn interpret(response: &OutboundResponse) -> Result<(), String> {
+    if (200..300).contains(&response.status) {
+        return Ok(());
     }
-    let target = notification.ascender.as_ref().or(notification.awx.as_ref());
-    let Some(target) = target else {
-        return Ok(None);
-    };
-    let answer: Value = serde_json::from_str(&response.body).unwrap_or(Value::Null);
-    match target.trigger {
-        JobTrigger::Launch => {
-            // Without "Prompt on launch" for variables (or a survey), the
-            // controller drops extra_vars and says so only here: the job
-            // would run without the event.
-            if answer
-                .get("ignored_fields")
-                .and_then(|f| f.get("extra_vars"))
-                .is_some()
-            {
-                return Err(
-                    "the job template ignored extra_vars: tick \"Prompt on launch\" \
-                     for its variables"
-                        .to_string(),
-                );
-            }
-            Ok(answer
-                .get("job")
-                .or_else(|| answer.get("workflow_job"))
-                .or_else(|| answer.get("id"))
-                .map(|id| id.to_string()))
-        }
-        JobTrigger::Webhook => Ok(None),
-    }
+    let excerpt: String = response.body.chars().take(300).collect();
+    Err(format!("HTTP {}: {}", response.status, excerpt.trim()))
 }
 
 // Worth sending again: no answer at all, or a receiver that is overloaded or
 // failing. A 4xx is this side's mistake (a wrong key, a wrong template) and
 // will not fix itself.
-fn retryable(result: &Result<OutboundResponse, String>) -> bool {
+fn retryable(result: &Result<OutboundResponse, SendError>) -> bool {
     match result {
-        Err(_) => true,
+        Err(e) => e.retryable,
         Ok(response) => response.status == 429 || response.status >= 500,
     }
 }
@@ -493,8 +505,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-// The last send of each notification, for the API and the UI. In memory,
-// like run history.
+// One send of a webhook, for the API and the UI.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Delivery {
     pub event: String,
@@ -505,38 +516,53 @@ pub struct Delivery {
     pub attempts: u32,
     // The receiver's HTTP status, when it answered.
     pub status: Option<u16>,
-    // The job the controller started, when it says (launch).
-    pub job: Option<String>,
     pub error: Option<String>,
 }
 
+// How many sends each webhook keeps. In memory, like run history: a
+// restart starts it over.
+pub const DELIVERY_HISTORY: usize = 50;
+
+// Each webhook's recent sends, newest first.
 #[derive(Default)]
 pub struct DeliveryLog {
-    last: DashMap<String, Delivery>,
+    sends: DashMap<String, std::collections::VecDeque<Delivery>>,
 }
 
 impl DeliveryLog {
-    pub fn last(&self, notification_id: &str) -> Option<Delivery> {
-        self.last.get(notification_id).map(|d| d.clone())
+    pub fn last(&self, webhook_id: &str) -> Option<Delivery> {
+        self.sends.get(webhook_id).and_then(|h| h.front().cloned())
     }
 
-    fn record(&self, notification_id: &str, delivery: Delivery) {
-        self.last.insert(notification_id.to_string(), delivery);
+    pub fn history(&self, webhook_id: &str) -> Vec<Delivery> {
+        self.sends
+            .get(webhook_id)
+            .map(|h| h.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn record(&self, webhook_id: &str, delivery: Delivery) {
+        let mut history = self.sends.entry(webhook_id.to_string()).or_default();
+        history.push_front(delivery);
+        history.truncate(DELIVERY_HISTORY);
     }
 }
 
-// One message for one notification, its definition as of the run that made
+// One message for one webhook, its definition as of the run that made
 // it: a reload while it waits does not change where it goes.
 pub struct Job {
-    pub notification_id: String,
-    pub notification: Notification,
+    pub webhook_id: String,
+    pub webhook: Webhook,
     pub message: Map<String, Value>,
 }
 
 // Bounded: a receiver that is down for hours must not grow memory without
-// limit. A full queue drops the new message, counted and logged.
+// limit. Messages waiting or being sent count against it; past it the new
+// message is dropped, counted and logged.
 const QUEUE: usize = 1000;
-// Sends in flight at once, so one slow receiver does not hold up the others.
+// Requests in flight at once. A slot is held for one attempt only, never
+// through the wait before a retry, so a receiver that is down slows its own
+// messages, not everyone's.
 const CONCURRENT: usize = 8;
 // Longest wait between two attempts.
 const MAX_BACKOFF_SECONDS: u64 = 60;
@@ -546,6 +572,8 @@ pub struct Dispatcher {
     // Taken by start(); None once the worker runs.
     rx: std::sync::Mutex<Option<mpsc::Receiver<Job>>>,
     pub log: Arc<DeliveryLog>,
+    // Messages queued or being sent: what QUEUE bounds and drain waits for.
+    pending: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Default for Dispatcher {
@@ -561,25 +589,35 @@ impl Dispatcher {
             tx,
             rx: std::sync::Mutex::new(Some(rx)),
             log: Arc::new(DeliveryLog::default()),
+            pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
     pub fn enqueue(&self, job: Job) {
-        if let Err(e) = self.tx.try_send(job) {
-            let job = match e {
-                mpsc::error::TrySendError::Full(job) | mpsc::error::TrySendError::Closed(job) => {
+        use std::sync::atomic::Ordering;
+        let room = self.pending.load(Ordering::SeqCst) < QUEUE;
+        let job = if room {
+            self.pending.fetch_add(1, Ordering::SeqCst);
+            match self.tx.try_send(job) {
+                Ok(()) => return,
+                Err(
+                    mpsc::error::TrySendError::Full(job) | mpsc::error::TrySendError::Closed(job),
+                ) => {
+                    self.pending.fetch_sub(1, Ordering::SeqCst);
                     job
                 }
-            };
-            let event = job
-                .message
-                .get("event")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            tracing::warn!(notification = %job.notification_id, event = %event, "notification queue full; message dropped");
-            count(&job.notification_id, &event, "dropped");
-        }
+            }
+        } else {
+            job
+        };
+        let event = job
+            .message
+            .get("event")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        tracing::warn!(webhook = %job.webhook_id, event = %event, "webhook queue full; message dropped");
+        count(&job.webhook_id, &event, "dropped");
     }
 
     // Starts the worker that sends what is queued. Once: later calls do
@@ -590,32 +628,47 @@ impl Dispatcher {
             return;
         };
         let log = Arc::clone(&self.log);
+        let pending = Arc::clone(&self.pending);
         tokio::spawn(async move {
             let slots = Arc::new(Semaphore::new(CONCURRENT));
             while let Some(job) = rx.recv().await {
-                let Ok(slot) = Arc::clone(&slots).acquire_owned().await else {
-                    return;
-                };
-                let (secrets, http, log) =
-                    (Arc::clone(&secrets), Arc::clone(&http), Arc::clone(&log));
+                let (secrets, http, log, slots, pending) = (
+                    Arc::clone(&secrets),
+                    Arc::clone(&http),
+                    Arc::clone(&log),
+                    Arc::clone(&slots),
+                    Arc::clone(&pending),
+                );
                 tokio::spawn(async move {
-                    let _slot = slot;
-                    deliver(&*secrets, &*http, &log, job, true).await;
+                    deliver(&*secrets, &*http, &log, job, Some(&slots)).await;
+                    pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 });
             }
         });
     }
+
+    // Waits for what is queued or being sent, at most `grace`, and answers
+    // how many messages were still left. Shutdown calls it after the runs
+    // have finished, so the events of the last runs still go out.
+    pub async fn drain(&self, grace: Duration) -> usize {
+        use std::sync::atomic::Ordering;
+        let deadline = Instant::now() + grace;
+        while self.pending.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        self.pending.load(Ordering::SeqCst)
+    }
 }
 
-// Sends one message, with retries when `retry` is set, records the outcome
-// and returns it. The worker's path, and the "Send test" button's (which
-// answers at once, without retrying).
+// Sends one message, records the outcome and returns it. With `slots` (the
+// worker's path) it retries, holding a slot for each attempt only; without
+// (the "Send test" button) it tries once and answers at once.
 pub async fn deliver(
     secrets: &dyn SecretsPort,
     http: &dyn HttpSenderPort,
     log: &DeliveryLog,
     job: Job,
-    retry: bool,
+    slots: Option<&Semaphore>,
 ) -> Delivery {
     let started = Instant::now();
     let event = job
@@ -636,31 +689,39 @@ pub async fn deliver(
         ok: false,
         attempts: 0,
         status: None,
-        job: None,
         error: None,
     };
 
-    let request = match resolve(secrets, job.notification.credentials()).await {
-        Ok(credentials) => build_request(&job.notification, &job.message, &credentials),
+    // A request that cannot be built (a missing credential field, a value
+    // HTTP cannot carry) is the configuration's to fix: not retried.
+    let request = match resolve(secrets, job.webhook.credentials()).await {
+        Ok(credentials) => build_request(&job.webhook, &job.message, &credentials),
         Err(e) => Err(e),
     };
     match request {
         Err(e) => delivery.error = Some(e),
         Ok(request) => {
-            let retries = if retry {
-                retries_of(&job.notification)
+            let retries = if slots.is_some() {
+                retries_of(&job.webhook)
             } else {
                 0
             };
             loop {
                 delivery.attempts += 1;
+                let slot = match slots {
+                    Some(slots) => slots.acquire().await.ok(),
+                    None => None,
+                };
                 let result = http.send(request.clone()).await;
+                drop(slot);
                 delivery.status = result.as_ref().ok().map(|r| r.status);
                 let again = retryable(&result);
-                match result.and_then(|response| interpret(&job.notification, &response)) {
-                    Ok(started_job) => {
+                match result
+                    .map_err(|e| e.message)
+                    .and_then(|response| interpret(&response))
+                {
+                    Ok(()) => {
                         delivery.ok = true;
-                        delivery.job = started_job;
                         delivery.error = None;
                         break;
                     }
@@ -676,34 +737,34 @@ pub async fn deliver(
     }
 
     let outcome = if delivery.ok { "success" } else { "error" };
-    count(&job.notification_id, &event, outcome);
+    count(&job.webhook_id, &event, outcome);
     metrics::histogram!(
-        "unified_gitops_notification_duration_seconds",
-        "notification" => job.notification_id.clone()
+        "unified_gitops_webhook_duration_seconds",
+        "webhook" => job.webhook_id.clone()
     )
     .record(started.elapsed().as_secs_f64());
     if delivery.ok {
-        tracing::info!(notification = %job.notification_id, event = %event, attempts = delivery.attempts, "notification sent");
+        tracing::info!(webhook = %job.webhook_id, event = %event, attempts = delivery.attempts, "webhook sent");
     } else {
         tracing::warn!(
-            notification = %job.notification_id,
+            webhook = %job.webhook_id,
             event = %event,
             attempts = delivery.attempts,
             error = delivery.error.as_deref().unwrap_or(""),
-            "notification failed"
+            "webhook failed"
         );
     }
-    log.record(&job.notification_id, delivery.clone());
+    log.record(&job.webhook_id, delivery.clone());
     delivery
 }
 
-fn retries_of(notification: &Notification) -> u32 {
-    notification
+fn retries_of(webhook: &Webhook) -> u32 {
+    webhook
         .webhook
         .as_ref()
         .map(|w| w.retries)
-        .or_else(|| notification.ascender.as_ref().map(|t| t.retries))
-        .or_else(|| notification.awx.as_ref().map(|t| t.retries))
+        .or_else(|| webhook.ascender.as_ref().map(|t| t.retries))
+        .or_else(|| webhook.awx.as_ref().map(|t| t.retries))
         .unwrap_or(0)
 }
 
@@ -716,28 +777,28 @@ async fn resolve(
         .map_err(|e| e.message)
 }
 
-fn count(notification_id: &str, event: &str, outcome: &'static str) {
+fn count(webhook_id: &str, event: &str, outcome: &'static str) {
     metrics::counter!(
-        "unified_gitops_notifications_total",
-        "notification" => notification_id.to_string(),
+        "unified_gitops_webhooks_total",
+        "webhook" => webhook_id.to_string(),
         "event" => event.to_string(),
         "outcome" => outcome
     )
     .increment(1);
 }
 
-// After a run: names its event, if any, and queues it for every notification
+// After a run: names its event, if any, and queues it for every webhook
 // that wants it from this application.
 pub fn after_run(
     dispatcher: &Dispatcher,
-    notifications: &HashMap<String, Notification>,
+    webhooks: &HashMap<String, Webhook>,
     outcome: &RunOutcome<'_>,
 ) {
-    if notifications.is_empty() {
+    if webhooks.is_empty() {
         return;
     }
     let event = outcome.detected.event;
-    let mut wanted: Vec<(&String, &Notification)> = notifications
+    let mut wanted: Vec<(&String, &Webhook)> = webhooks
         .iter()
         .filter(|(_, n)| n.wants(event, outcome.application))
         .collect();
@@ -746,12 +807,12 @@ pub fn after_run(
     }
     wanted.sort_by(|a, b| a.0.cmp(b.0));
     let base = message(outcome);
-    for (id, notification) in wanted {
+    for (id, webhook) in wanted {
         let mut m = base.clone();
-        m.insert("notification".into(), json!(id));
+        m.insert("webhook".into(), json!(id));
         dispatcher.enqueue(Job {
-            notification_id: id.clone(),
-            notification: notification.clone(),
+            webhook_id: id.clone(),
+            webhook: webhook.clone(),
             message: m,
         });
     }
@@ -763,14 +824,17 @@ mod tests {
     use crate::domain::plan::{Change, OpKind, Operation};
     use crate::domain::run::AppliedOperation;
 
+    // `synced`: the tree of the application's folder when it was last in sync.
     fn baseline(status: SyncStatus, synced: Option<&str>) -> Baseline {
         Baseline {
             status,
-            synced_revision: synced.map(str::to_string),
+            synced_tree: synced.map(str::to_string),
+            rolled_back: false,
         }
     }
 
-    fn record(mode: RunMode, trigger: Trigger, result: RunResult, revision: &str) -> RunRecord {
+    // `tree`: the folder's tree this run read (its commit is made up).
+    fn record(mode: RunMode, trigger: Trigger, result: RunResult, tree: &str) -> RunRecord {
         RunRecord {
             id: 1,
             trigger,
@@ -778,7 +842,8 @@ mod tests {
             result,
             started_at: 0,
             finished_at: 1_700_000_000,
-            revision: Some(revision.to_string()),
+            revision: Some(format!("commit-of-{tree}")),
+            tree: Some(tree.to_string()),
             planned: 0,
             operations: Vec::new(),
             applied: Vec::new(),
@@ -948,6 +1013,88 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_commit_to_another_folder_does_not_hide_drift() {
+        // In sync with folder tree t1; someone commits elsewhere in the
+        // repository (a new commit, the same tree here), then edits the
+        // system by hand.
+        let mut r = record(RunMode::Plan, Trigger::Schedule, RunResult::OutOfSync, "t1");
+        r.revision = Some("another-commit".into());
+        let d = detect(
+            &baseline(SyncStatus::Synced, Some("t1")),
+            &r,
+            SyncStatus::OutOfSync,
+        );
+        assert_eq!(
+            event(d),
+            Some((Event::DriftDetected, Some(Cause::Drift), Some(false)))
+        );
+    }
+
+    #[test]
+    fn drift_after_a_failure_is_reported() {
+        let r = record(RunMode::Plan, Trigger::Schedule, RunResult::OutOfSync, "t1");
+        let d = detect(
+            &baseline(SyncStatus::Failed, Some("t1")),
+            &r,
+            SyncStatus::OutOfSync,
+        );
+        assert_eq!(
+            event(d),
+            Some((Event::DriftDetected, Some(Cause::Drift), Some(false)))
+        );
+    }
+
+    #[test]
+    fn a_standing_rollback_keeps_scheduled_checks_quiet_but_not_failures() {
+        let mut rolled = baseline(SyncStatus::Synced, Some("t1"));
+        rolled.rolled_back = true;
+        let pending = record(RunMode::Plan, Trigger::Schedule, RunResult::OutOfSync, "t2");
+        assert_eq!(detect(&rolled, &pending, SyncStatus::OutOfSync), None);
+        let failed = record(RunMode::Plan, Trigger::Schedule, RunResult::Failed, "t2");
+        assert!(detect(&rolled, &failed, SyncStatus::Failed).is_some());
+    }
+
+    #[test]
+    fn without_a_tree_the_cause_is_unknown() {
+        let mut r = record(
+            RunMode::Apply,
+            Trigger::Schedule,
+            RunResult::Succeeded,
+            "t1",
+        );
+        r.tree = None;
+        r.applied.push(applied(true));
+        let d = detect(
+            &baseline(SyncStatus::Synced, Some("t1")),
+            &r,
+            SyncStatus::Synced,
+        );
+        assert_eq!(event(d), Some((Event::SyncSucceeded, None, None)));
+    }
+
+    #[test]
+    fn an_absent_value_is_null_outside_quotes_and_empty_inside() {
+        let m = outcome_message();
+        let body = render(r#"{"r": {{reverted}}, "s": "{{reverted}}"}"#, &m);
+        let parsed: Value = serde_json::from_str(&body).expect(&body);
+        assert_eq!(parsed["r"], Value::Null);
+        assert_eq!(parsed["s"], json!(""));
+    }
+
+    #[test]
+    fn render_reads_placeholders_as_the_load_check_does() {
+        // The check sees one placeholder, `application`; so does render:
+        // the unclosed `{{a ` is text.
+        let template = "x {{a {{application}} y {{}} z";
+        let names: Vec<&str> = crate::domain::webhook::placeholders(template).collect();
+        assert_eq!(names, ["application"]);
+        assert_eq!(
+            render(template, &outcome_message()),
+            "x {{a portainer y {{}} z"
+        );
+    }
+
     fn outcome_message() -> Map<String, Value> {
         let mut r = record(
             RunMode::Apply,
@@ -955,6 +1102,7 @@ mod tests {
             RunResult::Succeeded,
             "0123456789abcdef",
         );
+        r.revision = Some("0123456789abcdef".into());
         r.operations.push(Operation {
             kind: "user".into(),
             key: "jane".into(),
@@ -1014,7 +1162,7 @@ mod tests {
         assert_eq!(parsed["x"], json!(""));
     }
 
-    fn notification(yaml: &str) -> Notification {
+    fn webhook(yaml: &str) -> Webhook {
         serde_saphyr::from_str(yaml).unwrap()
     }
 
@@ -1030,7 +1178,7 @@ mod tests {
     fn a_webhook_puts_the_credential_where_auth_says() {
         let creds = HashMap::from([("token".to_string(), "t0k".to_string())]);
         let m = outcome_message();
-        let bearer = notification(
+        let bearer = webhook(
             "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [c]\n",
         );
         let request = build_request(&bearer, &m, &creds).unwrap();
@@ -1039,7 +1187,7 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&request.body).unwrap();
         assert_eq!(parsed["application"], json!("portainer"));
 
-        let named = notification(
+        let named = webhook(
             "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [c]\n  auth: {header: X-Gitlab-Token}\n  headers: {X-Gitlab-Event: unified-gitops}\n",
         );
         let request = build_request(&named, &m, &creds).unwrap();
@@ -1047,17 +1195,32 @@ mod tests {
         assert_eq!(header(&request, "Authorization"), None);
         assert_eq!(header(&request, "X-Gitlab-Event"), Some("unified-gitops"));
 
-        let basic = notification(
+        let basic = webhook(
             "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [c]\n  auth: basic\n",
         );
         let err = build_request(&basic, &m, &creds).unwrap_err();
         assert!(err.contains("'username'"), "{err}");
+
+        // A key as the username and no password: allowed.
+        let key_only = HashMap::from([("username".to_string(), "api-key".to_string())]);
+        let request = build_request(&basic, &m, &key_only).unwrap();
+        assert_eq!(
+            header(&request, "Authorization"),
+            Some("Basic YXBpLWtleTo=")
+        );
+
+        // A token read from a file with its trailing newline: refused before
+        // anything is sent.
+        let newline = HashMap::from([("token".to_string(), "t0k\n".to_string())]);
+        let err = build_request(&bearer, &m, &newline).unwrap_err();
+        assert!(err.contains("line break"), "{err}");
+        assert!(!err.contains("t0k"), "{err}");
     }
 
     #[test]
     fn a_signed_webhook_carries_the_hmac_of_its_body() {
         let creds = HashMap::from([("secret".to_string(), "Jefe".to_string())]);
-        let signed = notification(
+        let signed = webhook(
             "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [c]\n  auth: none\n  body: 'what do ya want for nothing?'\n  sign: {}\n",
         );
         let request = build_request(&signed, &outcome_message(), &creds).unwrap();
@@ -1071,7 +1234,7 @@ mod tests {
     #[test]
     fn a_job_template_webhook_uses_the_gitlab_receiver_and_its_key() {
         let creds = HashMap::from([("token".to_string(), "jt-key".to_string())]);
-        let n = notification(
+        let n = webhook(
             "type: ascender\nevents: [drift_detected]\nascender:\n  url: https://ascender.example.com\n  job_template: 12\n  credentials: [k]\n",
         );
         let request = build_request(&n, &outcome_message(), &creds).unwrap();
@@ -1090,54 +1253,30 @@ mod tests {
     }
 
     #[test]
-    fn a_launch_sends_the_message_under_extra_vars() {
-        let creds = HashMap::from([("token".to_string(), "user-token".to_string())]);
-        let n = notification(
-            "type: awx\nevents: [drift_detected]\nawx:\n  url: https://awx.example.com\n  job_template: 5\n  trigger: launch\n  credentials: [t]\n  extra_vars: {report: drift}\n",
-        );
-        let request = build_request(&n, &outcome_message(), &creds).unwrap();
-        assert_eq!(
-            request.url,
-            "https://awx.example.com/api/v2/job_templates/5/launch/"
-        );
-        assert_eq!(header(&request, "Authorization"), Some("Bearer user-token"));
-        let parsed: Value = serde_json::from_slice(&request.body).unwrap();
-        assert_eq!(parsed["extra_vars"]["report"], json!("drift"));
-        assert_eq!(
-            parsed["extra_vars"]["unified_gitops"]["application"],
-            json!("portainer")
-        );
-    }
-
-    #[test]
-    fn a_launch_whose_variables_were_ignored_is_a_failure() {
-        let n = notification(
-            "type: ascender\nevents: [drift_detected]\nascender:\n  url: https://a.example.com\n  job_template: 5\n  trigger: launch\n  credentials: [t]\n",
-        );
-        let ignored = OutboundResponse {
-            status: 201,
-            body: r#"{"job": 77, "ignored_fields": {"extra_vars": {"unified_gitops": {}}}}"#.into(),
+    fn any_2xx_is_taken_and_anything_else_says_why() {
+        let queued = OutboundResponse {
+            status: 202,
+            body: r#"{"message": "Job queued."}"#.into(),
         };
-        assert!(
-            interpret(&n, &ignored)
-                .unwrap_err()
-                .contains("Prompt on launch")
-        );
-        let started = OutboundResponse {
-            status: 201,
-            body: r#"{"job": 77, "id": 77}"#.into(),
-        };
-        assert_eq!(interpret(&n, &started).unwrap(), Some("77".to_string()));
+        assert!(interpret(&queued).is_ok());
         let refused = OutboundResponse {
             status: 403,
             body: r#"{"detail": "You do not have permission"}"#.into(),
         };
-        assert!(interpret(&n, &refused).unwrap_err().starts_with("HTTP 403"));
+        assert!(interpret(&refused).unwrap_err().starts_with("HTTP 403"));
     }
 
     #[test]
     fn only_unanswered_or_server_failures_are_retried() {
-        assert!(retryable(&Err("timed out".into())));
+        assert!(retryable(&Err(SendError {
+            message: "timed out".into(),
+            retryable: true,
+        })));
+        // A request that could not be built fails the same way every time.
+        assert!(!retryable(&Err(SendError {
+            message: "builder error".into(),
+            retryable: false,
+        })));
         assert!(retryable(&Ok(OutboundResponse {
             status: 503,
             body: String::new()
