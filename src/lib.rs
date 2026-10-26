@@ -35,6 +35,8 @@ pub struct AppBuilder {
     connectors: HashMap<String, Connector>,
     projects: HashMap<String, GitProject>,
     credentials: HashMap<String, Credential>,
+    notifications: HashMap<String, domain::notification::Notification>,
+    http: Arc<dyn ports::notifier::HttpSenderPort>,
     secrets_settings: config::SecretsConfig,
     projects_dir: std::path::PathBuf,
     ui: crate::config::UiConfig,
@@ -64,6 +66,8 @@ impl AppBuilder {
             connectors: HashMap::new(),
             projects: HashMap::new(),
             credentials: HashMap::new(),
+            notifications: HashMap::new(),
+            http: Arc::new(adapters::out::notify::http::ReqwestSender::new()),
             secrets_settings: config::SecretsConfig::default(),
             projects_dir: std::path::PathBuf::from("projects"),
             ui: crate::config::UiConfig::default(),
@@ -146,6 +150,20 @@ impl AppBuilder {
     // The credential DEFINITIONS (not their values), and the settings the
     // resolver chain is built from. Both only matter to a reload: it rebuilds
     // the chain from the new ones and reports which credential changed.
+    pub fn notifications(
+        mut self,
+        notifications: HashMap<String, domain::notification::Notification>,
+    ) -> Self {
+        self.notifications = notifications;
+        self
+    }
+
+    // What notifications are sent through: a recorder in tests.
+    pub fn http(mut self, http: Arc<dyn ports::notifier::HttpSenderPort>) -> Self {
+        self.http = http;
+        self
+    }
+
     pub fn credentials(
         mut self,
         credentials: HashMap<String, Credential>,
@@ -168,6 +186,7 @@ impl AppBuilder {
         self.connectors = cfg.connectors.clone();
         self.projects = cfg.projects.clone();
         self.credentials = cfg.credentials.clone();
+        self.notifications = cfg.notifications.clone();
         self.secrets_settings = cfg.secrets_config.clone();
         self.projects_dir = std::path::PathBuf::from(&cfg.projects_config.dir);
         self.state_dir = std::path::PathBuf::from(&cfg.state.dir);
@@ -274,6 +293,7 @@ impl AppBuilder {
                 connectors: self.connectors,
                 projects: self.projects,
                 credentials: self.credentials,
+                notifications: self.notifications,
                 secrets: self.secrets_settings,
                 metrics_require_auth: self.metrics_require_auth,
                 cors_allowed_origins: self.cors_allowed_origins,
@@ -298,6 +318,8 @@ impl AppBuilder {
             described: Arc::new(domain::connector::DescribedKinds::new()),
             started: std::time::Instant::now(),
             login_throttle: Arc::new(crate::application::login::LoginThrottle::default()),
+            notifier: Arc::new(application::notify::Dispatcher::new()),
+            http: self.http,
         });
         let router = adapters::r#in::http::routes::create_router(
             Arc::clone(&state),

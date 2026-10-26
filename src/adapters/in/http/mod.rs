@@ -12,6 +12,7 @@ pub mod html;
 pub mod index;
 pub mod login;
 pub mod metrics;
+pub mod notifications;
 pub mod openapi;
 pub mod projects;
 pub mod routes;

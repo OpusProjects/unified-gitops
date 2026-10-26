@@ -4,6 +4,7 @@ pub mod connector;
 pub mod credential;
 pub mod desired;
 pub mod ldap;
+pub mod notification;
 pub mod plan;
 pub mod project;
 pub mod run;

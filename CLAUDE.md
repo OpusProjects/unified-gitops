@@ -45,14 +45,17 @@ src/
 │   ├── desired.rs            # desired-state files: parse, load a folder, validate, order
 │   ├── plan.rs               # THE DIFF: only declared fields compared → Operation list
 │   ├── run.rs                # SyncStatus, RunRecord, PlanSnapshot, AppStateRegistry
+│   ├── notification.rs       # Notification: type (webhook/ascender/awx), events, its block
 │   ├── yaml.rs               # YAML → JSON with exact scalars ("0644" stays a string)
 │   ├── credential.rs, api_key.rs, ldap.rs, project.rs, sync_health.rs
 ├── application/
 │   ├── reconcile.rs          # THE LOOP: validate → list → copy → diff → apply → re-list
 │   ├── projects.rs           # pull a checkout (bounded by timeout_seconds)
+│   ├── notify.rs             # event per run (detect), message, request per type, queue + worker
 │   ├── scripts.rs            # per-run script path resolution into checkouts
 │   ├── credentials.rs, login.rs, config.rs (reload)
-├── ports/                    # connector, state_store, git, secrets, directory, config_store, venv
+├── ports/                    # connector, state_store, git, secrets, directory, config_store, venv,
+│                             #   notifier (sends one built HTTP request)
 └── adapters/
     ├── in/http/              # applications (+ state copies), connectors, projects,
     │                         #   credentials, settings, users (auth), config, login, session,
@@ -61,6 +64,7 @@ src/
     └── out/
         ├── connectors/process.rs  # ConnectorPort → script (scrubbed env, APPLICATION_CONFIG, timeout kills)
         ├── state/fs.rs         # StateStorePort → <state.dir>/<application>/<kind>.yaml
+        ├── notify/http.rs      # HttpSenderPort → reqwest (no redirects followed)
         ├── git/, secrets/, directory/, config/, python.rs, process_env.rs
 tests/                        # integration tests; tests/connectors/ holds test connector scripts
                               #   (kv.py + the SDK, copied from unified-connectors)

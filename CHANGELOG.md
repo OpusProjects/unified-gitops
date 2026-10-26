@@ -6,6 +6,10 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Notifications: a `notifications` item sends `drift_detected`, `out_of_sync`, `sync_succeeded`, `sync_failed` and `back_in_sync` to a webhook (any receiver, with bearer, basic or header auth, a body template and optional HMAC signing) or to an Ascender or AWX job template (its webhook receiver or its launch API), one message per run, queued and retried, never with a field's value; `GET /api/v1/notifications` shows each one's last send and `POST /api/v1/notifications/{id}/test` sends a test (see `docs/notifications.md`).
+
 ### Changed
 
 - **Breaking (who runs the image):** the image no longer bundles a demo configuration or connectors (`/app/config`, `/app/connectors`); mount your configuration at `/app/config` or set `CONFIG_DIR`, and take connectors from a project such as [unified-connectors](https://github.com/OpusProjects/unified-connectors), which now holds the SDK and the `kv` example.

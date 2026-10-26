@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock};
 use crate::domain::app::Application;
 use crate::domain::connector::Connector;
 use crate::domain::credential::Credential;
+use crate::domain::notification::Notification;
 use crate::domain::project::GitProject;
 use crate::domain::run::AppStateRegistry;
 use crate::domain::sync_health::SyncHealthRegistry;
@@ -27,6 +28,8 @@ pub struct RuntimeConfig {
     // copy. It lives in the snapshot so a reload can say WHICH credential
     // changed.
     pub credentials: HashMap<String, Credential>,
+    // Read after every run, so they reload like applications.
+    pub notifications: HashMap<String, Notification>,
     // Carried for the same reason as `credentials`: the chain is rebuilt from
     // it on every reload.
     pub secrets: crate::config::SecretsConfig,
@@ -54,6 +57,8 @@ impl RuntimeConfig {
             applications: &self.applications,
             connectors: &self.connectors,
             projects: &self.projects,
+            notifications: &self.notifications,
+            url: self.url.as_deref(),
         }
     }
 }
@@ -171,6 +176,10 @@ pub struct AppState {
     // Recent failed LDAP logins and the cap on concurrent ones (see
     // application::login::LoginThrottle).
     pub login_throttle: Arc<crate::application::login::LoginThrottle>,
+    // Queues what runs have to tell, and sends it (application::notify).
+    pub notifier: Arc<crate::application::notify::Dispatcher>,
+    // What sends it: an HTTP client in production, a recorder in tests.
+    pub http: Arc<dyn ports::notifier::HttpSenderPort>,
 }
 
 impl AppState {
@@ -224,6 +233,13 @@ impl AppState {
         *self.restart_pending.write().expect("restart pending lock") = keys;
     }
 
+    // Starts sending queued notifications. Once; main calls it beside the
+    // scheduler, and so does a test that wants to see what was sent.
+    pub fn start_notifier(&self) {
+        self.notifier
+            .start(Arc::clone(&self.secrets), Arc::clone(&self.http));
+    }
+
     // The ports a reconcile run uses, borrowed from the state that owns them.
     pub fn reconciler(&self) -> crate::application::reconcile::Reconciler<'_> {
         crate::application::reconcile::Reconciler {
@@ -238,6 +254,7 @@ impl AppState {
             venv: &*self.venv,
             project_health: &self.project_health,
             described: &self.described,
+            notifier: &self.notifier,
         }
     }
 }

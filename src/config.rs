@@ -7,6 +7,7 @@ use crate::domain::api_key::{ApiKeyDef, ApiKeyRole};
 use crate::domain::app::Application;
 use crate::domain::connector::Connector;
 use crate::domain::credential::Credential;
+use crate::domain::notification::Notification;
 use crate::domain::project::GitProject;
 
 pub struct AppConfig {
@@ -20,6 +21,7 @@ pub struct AppConfig {
     pub connectors: HashMap<String, Connector>,
     pub applications: HashMap<String, Application>,
     pub api_keys: HashMap<String, ApiKeyDef>,
+    pub notifications: HashMap<String, Notification>,
 }
 
 // HTTP server configuration — config.yaml
@@ -182,12 +184,13 @@ pub struct ConfigApiConfig {
 pub const REQUIRED_CONFIG_FILE: &str = "config.yaml";
 
 // The top-level keys an item file may use.
-pub const SECTIONS: [&str; 5] = [
+pub const SECTIONS: [&str; 6] = [
     "applications",
     "connectors",
     "projects",
     "credentials",
     "api_keys",
+    "notifications",
 ];
 
 // Whether a path, relative to the configuration directory, can be a
@@ -535,6 +538,26 @@ impl AppConfig {
             }
         }
 
+        // Notifications: their own settings, then the applications they listen
+        // to and the credentials they send with.
+        for (id, notification) in &self.notifications {
+            errors.extend(notification.errors(id));
+            for app_id in &notification.applications {
+                if !self.applications.contains_key(app_id) {
+                    errors.push(format!(
+                        "Notification '{id}' references unknown application '{app_id}'"
+                    ));
+                }
+            }
+            for cred in notification.credentials() {
+                if !self.credentials.contains_key(cred) {
+                    errors.push(format!(
+                        "Notification '{id}' references unknown credential '{cred}'"
+                    ));
+                }
+            }
+        }
+
         // A vault_path needs a Vault to read it from.
         if self.secrets_config.vault.is_none() {
             for (id, credential) in &self.credentials {
@@ -720,18 +743,20 @@ pub fn load_config_detailed(dir: &Path) -> Result<AppConfig, ConfigErrors> {
         }
     }
     let mut section = |name: &str| entries.remove(name).unwrap_or_default();
-    let (c, pr, pl, ap, ak) = (
+    let (c, pr, pl, ap, ak, nt) = (
         section("credentials"),
         section("projects"),
         section("connectors"),
         section("applications"),
         section("api_keys"),
+        section("notifications"),
     );
     let credentials = take("credential", c, &mut errors);
     let projects = take("project", pr, &mut errors);
     let connectors = take("connector", pl, &mut errors);
     let applications = take("application", ap, &mut errors);
     let api_keys = take("API key", ak, &mut errors);
+    let notifications = take("notification", nt, &mut errors);
     if !errors.is_empty() {
         // Cross-references are only worth checking once every item parsed:
         // otherwise one typo'd connector also reports every application using it.
@@ -749,6 +774,7 @@ pub fn load_config_detailed(dir: &Path) -> Result<AppConfig, ConfigErrors> {
         connectors,
         applications,
         api_keys,
+        notifications,
     };
 
     let errors = config.validate_errors();
@@ -922,6 +948,49 @@ mod tests {
     const CONNECTOR: &str = "connectors:\n  - name: kv\n    path: connectors/kv.py\n";
     const PROJECT: &str =
         "projects:\n  - name: prj-state\n    git_url: https://example.com/state.git\n";
+
+    const APPLICATION: &str =
+        "applications:\n  - name: portainer\n    connector: kv\n    project: prj-state\n";
+    const CREDENTIAL: &str = "credentials:\n  - name: cred-key\n    type: token\n    env_prefix: JT\n    secret_keys:\n      token: KEY\n";
+
+    #[test]
+    fn notifications_load_as_items() {
+        let dir = dir_with(&[
+            ("connectors/kv.yaml", CONNECTOR),
+            ("projects.yaml", PROJECT),
+            ("applications/portainer.yaml", APPLICATION),
+            ("credentials/cred-key.yaml", CREDENTIAL),
+            (
+                "notifications/ntf-ascender-drift.yaml",
+                "notifications:\n  - name: ntf-ascender-drift\n    type: ascender\n    events: [drift_detected]\n    applications: [portainer]\n    ascender:\n      url: https://ascender.example.com\n      job_template: 12\n      credentials: [cred-key]\n",
+            ),
+        ]);
+        let cfg = load_config(dir.path().to_str().unwrap()).expect("loads");
+        let n = &cfg.notifications["ntf-ascender-drift"];
+        assert_eq!(n.applications, vec!["portainer".to_string()]);
+    }
+
+    #[test]
+    fn a_notification_must_name_known_applications_and_credentials() {
+        let dir = dir_with(&[
+            ("connectors/kv.yaml", CONNECTOR),
+            ("projects.yaml", PROJECT),
+            ("applications/portainer.yaml", APPLICATION),
+            (
+                "notifications/n.yaml",
+                "notifications:\n  - name: n\n    type: webhook\n    events: [sync_failed]\n    applications: [portainr]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-nope]\n",
+            ),
+        ]);
+        let err = load_err(&dir);
+        assert!(
+            err.contains("Notification 'n' references unknown application 'portainr'"),
+            "{err}"
+        );
+        assert!(
+            err.contains("Notification 'n' references unknown credential 'cred-nope'"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn items_load_from_any_depth_by_their_top_level_key() {
