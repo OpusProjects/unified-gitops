@@ -16,13 +16,13 @@ async fn main() {
             Ok(cfg) => {
                 println!(
                     "configuration OK ({}): {} applications, {} connectors, \
-                     {} credentials, {} projects, {} notifications",
+                     {} credentials, {} projects, {} webhooks",
                     config_dir,
                     cfg.applications.len(),
                     cfg.connectors.len(),
                     cfg.credentials.len(),
                     cfg.projects.len(),
-                    cfg.notifications.len(),
+                    cfg.webhooks.len(),
                 );
                 return;
             }
@@ -126,9 +126,9 @@ async fn main() {
     }
 
     let (app, state) = builder.build_with_state();
-    // Sends what runs have to tell (notifications), from the first run on:
+    // Sends what runs have to tell (webhooks), from the first run on:
     // a failure of the very first check is worth knowing.
-    state.start_notifier();
+    state.start_webhooks();
 
     // One switch for every background task. Flipped after the HTTP server has
     // drained; each task returns at its next wait point (a running apply is

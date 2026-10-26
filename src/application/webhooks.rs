@@ -9,12 +9,11 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{Semaphore, mpsc};
 use utoipa::ToSchema;
 
-use crate::domain::notification::{
-    Auth, AuthScheme, Event, JobTemplateTarget, JobTrigger, Notification, NotificationType,
-    WebhookTarget,
-};
 use crate::domain::run::{Baseline, RunMode, RunRecord, RunResult, SyncStatus, Trigger, now};
-use crate::ports::notifier::{HttpSenderPort, OutboundRequest, OutboundResponse};
+use crate::domain::webhook::{
+    Auth, AuthScheme, Event, HttpTarget, JobTemplateTarget, Webhook, WebhookType,
+};
+use crate::ports::http_sender::{HttpSenderPort, OutboundRequest, OutboundResponse};
 use crate::ports::secrets::SecretsPort;
 
 // The use case "tell someone what happened to an application".
@@ -22,7 +21,7 @@ use crate::ports::secrets::SecretsPort;
 // After every run, `detect` compares where the application stood before it
 // (its Baseline) with what the run found and did, and names at most one
 // event: one message per run, never "drift" and "synced" for the same
-// change. Notifications that want that event are queued; a worker sends
+// change. Webhooks that want that event are queued; a worker sends
 // them, so a slow receiver never holds up a run.
 
 // Why a sync changed something.
@@ -199,13 +198,13 @@ pub fn message(o: &RunOutcome<'_>) -> Map<String, Value> {
 }
 
 // The message a "Send test" sends: the real shape, marked as a test.
-pub fn test_message(notification_id: &str, base_url: Option<&str>) -> Map<String, Value> {
+pub fn test_message(webhook_id: &str, base_url: Option<&str>) -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("event".into(), json!("test"));
     m.insert("application".into(), Value::Null);
     m.insert(
         "description".into(),
-        json!(format!("Test of notification {notification_id}")),
+        json!(format!("Test of webhook {webhook_id}")),
     );
     for key in [
         "status",
@@ -272,27 +271,27 @@ fn placeholder_value(name: &str, message: &Map<String, Value>) -> String {
     }
 }
 
-// The request one notification sends for one message. Pure: the credentials
+// The request one webhook sends for one message. Pure: the credentials
 // arrive resolved, and nothing here touches the network.
 pub fn build_request(
-    notification: &Notification,
+    webhook: &Webhook,
     message: &Map<String, Value>,
     credentials: &HashMap<String, String>,
 ) -> Result<OutboundRequest, String> {
-    match notification.notification_type {
-        NotificationType::Webhook => {
-            let target = notification
+    match webhook.webhook_type {
+        WebhookType::Webhook => {
+            let target = webhook
                 .webhook
                 .as_ref()
                 .ok_or("type webhook needs a 'webhook:' block")?;
             webhook_request(target, message, credentials)
         }
-        NotificationType::Ascender | NotificationType::Awx => {
-            let target = notification
+        WebhookType::Ascender | WebhookType::Awx => {
+            let target = webhook
                 .ascender
                 .as_ref()
-                .or(notification.awx.as_ref())
-                .ok_or("a job template notification needs its block")?;
+                .or(webhook.awx.as_ref())
+                .ok_or("a job template webhook needs its block")?;
             job_template_request(target, message, credentials)
         }
     }
@@ -318,7 +317,7 @@ fn field<'a>(credentials: &'a HashMap<String, String>, name: &str) -> Result<&'a
 }
 
 fn webhook_request(
-    target: &WebhookTarget,
+    target: &HttpTarget,
     message: &Map<String, Value>,
     credentials: &HashMap<String, String>,
 ) -> Result<OutboundRequest, String> {
@@ -378,10 +377,9 @@ fn webhook_request(
     })
 }
 
-// Ascender and AWX speak the same routes. `webhook` posts the message to the
-// template's own receiver in GitLab mode (its key, compared as is, and any
-// event name; the playbook reads the message as <prefix>_webhook_payload).
-// `launch` starts it as a user, the message under extra_vars.unified_gitops.
+// Ascender and AWX speak the same routes: the message goes to the template's
+// own receiver in GitLab mode (its key, compared as is, and any event name;
+// the playbook reads the message as <prefix>_webhook_payload).
 fn job_template_request(
     target: &JobTemplateTarget,
     message: &Map<String, Value>,
@@ -390,67 +388,26 @@ fn job_template_request(
     let token = field(credentials, "token")?;
     let event = message.get("event").and_then(Value::as_str).unwrap_or("");
     let mut headers = base_headers(event);
-    let body = match target.trigger {
-        JobTrigger::Webhook => {
-            headers.push(("X-Gitlab-Token".into(), token.to_string()));
-            headers.push(("X-Gitlab-Event".into(), format!("unified-gitops {event}")));
-            serde_json::to_vec(message).map_err(|e| e.to_string())?
-        }
-        JobTrigger::Launch => {
-            headers.push(("Authorization".into(), format!("Bearer {token}")));
-            let mut extra_vars = target.extra_vars.clone();
-            extra_vars.insert("unified_gitops".into(), Value::Object(message.clone()));
-            serde_json::to_vec(&json!({ "extra_vars": extra_vars })).map_err(|e| e.to_string())?
-        }
-    };
+    headers.push(("X-Gitlab-Token".into(), token.to_string()));
+    headers.push(("X-Gitlab-Event".into(), format!("unified-gitops {event}")));
     Ok(OutboundRequest {
         method: "POST".into(),
         url: target.endpoint(),
         headers,
-        body,
+        body: serde_json::to_vec(message).map_err(|e| e.to_string())?,
         timeout: Duration::from_secs(target.timeout_seconds),
     })
 }
 
-// What an answer means for this receiver: Ok with the job it started, if it
-// says; Err with why it did not do what was asked.
-pub fn interpret(
-    notification: &Notification,
-    response: &OutboundResponse,
-) -> Result<Option<String>, String> {
-    if !(200..300).contains(&response.status) {
-        let excerpt: String = response.body.chars().take(300).collect();
-        return Err(format!("HTTP {}: {}", response.status, excerpt.trim()));
+// What an answer means: any 2xx is taken (a controller answers 202, "Job
+// queued.", or the same for a message it already had); anything else is why
+// it was not, with the start of what the receiver said.
+pub fn interpret(response: &OutboundResponse) -> Result<(), String> {
+    if (200..300).contains(&response.status) {
+        return Ok(());
     }
-    let target = notification.ascender.as_ref().or(notification.awx.as_ref());
-    let Some(target) = target else {
-        return Ok(None);
-    };
-    let answer: Value = serde_json::from_str(&response.body).unwrap_or(Value::Null);
-    match target.trigger {
-        JobTrigger::Launch => {
-            // Without "Prompt on launch" for variables (or a survey), the
-            // controller drops extra_vars and says so only here: the job
-            // would run without the event.
-            if answer
-                .get("ignored_fields")
-                .and_then(|f| f.get("extra_vars"))
-                .is_some()
-            {
-                return Err(
-                    "the job template ignored extra_vars: tick \"Prompt on launch\" \
-                     for its variables"
-                        .to_string(),
-                );
-            }
-            Ok(answer
-                .get("job")
-                .or_else(|| answer.get("workflow_job"))
-                .or_else(|| answer.get("id"))
-                .map(|id| id.to_string()))
-        }
-        JobTrigger::Webhook => Ok(None),
-    }
+    let excerpt: String = response.body.chars().take(300).collect();
+    Err(format!("HTTP {}: {}", response.status, excerpt.trim()))
 }
 
 // Worth sending again: no answer at all, or a receiver that is overloaded or
@@ -493,7 +450,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-// One send of a notification, for the API and the UI.
+// One send of a webhook, for the API and the UI.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Delivery {
     pub event: String,
@@ -504,47 +461,43 @@ pub struct Delivery {
     pub attempts: u32,
     // The receiver's HTTP status, when it answered.
     pub status: Option<u16>,
-    // The job the controller started, when it says (launch).
-    pub job: Option<String>,
     pub error: Option<String>,
 }
 
-// How many sends each notification keeps. In memory, like run history: a
+// How many sends each webhook keeps. In memory, like run history: a
 // restart starts it over.
 pub const DELIVERY_HISTORY: usize = 50;
 
-// Each notification's recent sends, newest first.
+// Each webhook's recent sends, newest first.
 #[derive(Default)]
 pub struct DeliveryLog {
     sends: DashMap<String, std::collections::VecDeque<Delivery>>,
 }
 
 impl DeliveryLog {
-    pub fn last(&self, notification_id: &str) -> Option<Delivery> {
-        self.sends
-            .get(notification_id)
-            .and_then(|h| h.front().cloned())
+    pub fn last(&self, webhook_id: &str) -> Option<Delivery> {
+        self.sends.get(webhook_id).and_then(|h| h.front().cloned())
     }
 
-    pub fn history(&self, notification_id: &str) -> Vec<Delivery> {
+    pub fn history(&self, webhook_id: &str) -> Vec<Delivery> {
         self.sends
-            .get(notification_id)
+            .get(webhook_id)
             .map(|h| h.iter().cloned().collect())
             .unwrap_or_default()
     }
 
-    fn record(&self, notification_id: &str, delivery: Delivery) {
-        let mut history = self.sends.entry(notification_id.to_string()).or_default();
+    fn record(&self, webhook_id: &str, delivery: Delivery) {
+        let mut history = self.sends.entry(webhook_id.to_string()).or_default();
         history.push_front(delivery);
         history.truncate(DELIVERY_HISTORY);
     }
 }
 
-// One message for one notification, its definition as of the run that made
+// One message for one webhook, its definition as of the run that made
 // it: a reload while it waits does not change where it goes.
 pub struct Job {
-    pub notification_id: String,
-    pub notification: Notification,
+    pub webhook_id: String,
+    pub webhook: Webhook,
     pub message: Map<String, Value>,
 }
 
@@ -592,8 +545,8 @@ impl Dispatcher {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            tracing::warn!(notification = %job.notification_id, event = %event, "notification queue full; message dropped");
-            count(&job.notification_id, &event, "dropped");
+            tracing::warn!(webhook = %job.webhook_id, event = %event, "webhook queue full; message dropped");
+            count(&job.webhook_id, &event, "dropped");
         }
     }
 
@@ -651,31 +604,25 @@ pub async fn deliver(
         ok: false,
         attempts: 0,
         status: None,
-        job: None,
         error: None,
     };
 
-    let request = match resolve(secrets, job.notification.credentials()).await {
-        Ok(credentials) => build_request(&job.notification, &job.message, &credentials),
+    let request = match resolve(secrets, job.webhook.credentials()).await {
+        Ok(credentials) => build_request(&job.webhook, &job.message, &credentials),
         Err(e) => Err(e),
     };
     match request {
         Err(e) => delivery.error = Some(e),
         Ok(request) => {
-            let retries = if retry {
-                retries_of(&job.notification)
-            } else {
-                0
-            };
+            let retries = if retry { retries_of(&job.webhook) } else { 0 };
             loop {
                 delivery.attempts += 1;
                 let result = http.send(request.clone()).await;
                 delivery.status = result.as_ref().ok().map(|r| r.status);
                 let again = retryable(&result);
-                match result.and_then(|response| interpret(&job.notification, &response)) {
-                    Ok(started_job) => {
+                match result.and_then(|response| interpret(&response)) {
+                    Ok(()) => {
                         delivery.ok = true;
-                        delivery.job = started_job;
                         delivery.error = None;
                         break;
                     }
@@ -691,34 +638,34 @@ pub async fn deliver(
     }
 
     let outcome = if delivery.ok { "success" } else { "error" };
-    count(&job.notification_id, &event, outcome);
+    count(&job.webhook_id, &event, outcome);
     metrics::histogram!(
-        "unified_gitops_notification_duration_seconds",
-        "notification" => job.notification_id.clone()
+        "unified_gitops_webhook_duration_seconds",
+        "webhook" => job.webhook_id.clone()
     )
     .record(started.elapsed().as_secs_f64());
     if delivery.ok {
-        tracing::info!(notification = %job.notification_id, event = %event, attempts = delivery.attempts, "notification sent");
+        tracing::info!(webhook = %job.webhook_id, event = %event, attempts = delivery.attempts, "webhook sent");
     } else {
         tracing::warn!(
-            notification = %job.notification_id,
+            webhook = %job.webhook_id,
             event = %event,
             attempts = delivery.attempts,
             error = delivery.error.as_deref().unwrap_or(""),
-            "notification failed"
+            "webhook failed"
         );
     }
-    log.record(&job.notification_id, delivery.clone());
+    log.record(&job.webhook_id, delivery.clone());
     delivery
 }
 
-fn retries_of(notification: &Notification) -> u32 {
-    notification
+fn retries_of(webhook: &Webhook) -> u32 {
+    webhook
         .webhook
         .as_ref()
         .map(|w| w.retries)
-        .or_else(|| notification.ascender.as_ref().map(|t| t.retries))
-        .or_else(|| notification.awx.as_ref().map(|t| t.retries))
+        .or_else(|| webhook.ascender.as_ref().map(|t| t.retries))
+        .or_else(|| webhook.awx.as_ref().map(|t| t.retries))
         .unwrap_or(0)
 }
 
@@ -731,28 +678,28 @@ async fn resolve(
         .map_err(|e| e.message)
 }
 
-fn count(notification_id: &str, event: &str, outcome: &'static str) {
+fn count(webhook_id: &str, event: &str, outcome: &'static str) {
     metrics::counter!(
-        "unified_gitops_notifications_total",
-        "notification" => notification_id.to_string(),
+        "unified_gitops_webhooks_total",
+        "webhook" => webhook_id.to_string(),
         "event" => event.to_string(),
         "outcome" => outcome
     )
     .increment(1);
 }
 
-// After a run: names its event, if any, and queues it for every notification
+// After a run: names its event, if any, and queues it for every webhook
 // that wants it from this application.
 pub fn after_run(
     dispatcher: &Dispatcher,
-    notifications: &HashMap<String, Notification>,
+    webhooks: &HashMap<String, Webhook>,
     outcome: &RunOutcome<'_>,
 ) {
-    if notifications.is_empty() {
+    if webhooks.is_empty() {
         return;
     }
     let event = outcome.detected.event;
-    let mut wanted: Vec<(&String, &Notification)> = notifications
+    let mut wanted: Vec<(&String, &Webhook)> = webhooks
         .iter()
         .filter(|(_, n)| n.wants(event, outcome.application))
         .collect();
@@ -761,12 +708,12 @@ pub fn after_run(
     }
     wanted.sort_by(|a, b| a.0.cmp(b.0));
     let base = message(outcome);
-    for (id, notification) in wanted {
+    for (id, webhook) in wanted {
         let mut m = base.clone();
-        m.insert("notification".into(), json!(id));
+        m.insert("webhook".into(), json!(id));
         dispatcher.enqueue(Job {
-            notification_id: id.clone(),
-            notification: notification.clone(),
+            webhook_id: id.clone(),
+            webhook: webhook.clone(),
             message: m,
         });
     }
@@ -1029,7 +976,7 @@ mod tests {
         assert_eq!(parsed["x"], json!(""));
     }
 
-    fn notification(yaml: &str) -> Notification {
+    fn webhook(yaml: &str) -> Webhook {
         serde_saphyr::from_str(yaml).unwrap()
     }
 
@@ -1045,7 +992,7 @@ mod tests {
     fn a_webhook_puts_the_credential_where_auth_says() {
         let creds = HashMap::from([("token".to_string(), "t0k".to_string())]);
         let m = outcome_message();
-        let bearer = notification(
+        let bearer = webhook(
             "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [c]\n",
         );
         let request = build_request(&bearer, &m, &creds).unwrap();
@@ -1054,7 +1001,7 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&request.body).unwrap();
         assert_eq!(parsed["application"], json!("portainer"));
 
-        let named = notification(
+        let named = webhook(
             "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [c]\n  auth: {header: X-Gitlab-Token}\n  headers: {X-Gitlab-Event: unified-gitops}\n",
         );
         let request = build_request(&named, &m, &creds).unwrap();
@@ -1062,7 +1009,7 @@ mod tests {
         assert_eq!(header(&request, "Authorization"), None);
         assert_eq!(header(&request, "X-Gitlab-Event"), Some("unified-gitops"));
 
-        let basic = notification(
+        let basic = webhook(
             "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [c]\n  auth: basic\n",
         );
         let err = build_request(&basic, &m, &creds).unwrap_err();
@@ -1072,7 +1019,7 @@ mod tests {
     #[test]
     fn a_signed_webhook_carries_the_hmac_of_its_body() {
         let creds = HashMap::from([("secret".to_string(), "Jefe".to_string())]);
-        let signed = notification(
+        let signed = webhook(
             "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [c]\n  auth: none\n  body: 'what do ya want for nothing?'\n  sign: {}\n",
         );
         let request = build_request(&signed, &outcome_message(), &creds).unwrap();
@@ -1086,7 +1033,7 @@ mod tests {
     #[test]
     fn a_job_template_webhook_uses_the_gitlab_receiver_and_its_key() {
         let creds = HashMap::from([("token".to_string(), "jt-key".to_string())]);
-        let n = notification(
+        let n = webhook(
             "type: ascender\nevents: [drift_detected]\nascender:\n  url: https://ascender.example.com\n  job_template: 12\n  credentials: [k]\n",
         );
         let request = build_request(&n, &outcome_message(), &creds).unwrap();
@@ -1105,74 +1052,17 @@ mod tests {
     }
 
     #[test]
-    fn a_launch_sends_the_message_under_extra_vars() {
-        let creds = HashMap::from([("token".to_string(), "user-token".to_string())]);
-        let n = notification(
-            "type: awx\nevents: [drift_detected]\nawx:\n  url: https://awx.example.com\n  job_template: 5\n  trigger: launch\n  credentials: [t]\n  extra_vars: {report: drift}\n",
-        );
-        let request = build_request(&n, &outcome_message(), &creds).unwrap();
-        assert_eq!(
-            request.url,
-            "https://awx.example.com/api/v2/job_templates/5/launch/"
-        );
-        assert_eq!(header(&request, "Authorization"), Some("Bearer user-token"));
-        let parsed: Value = serde_json::from_slice(&request.body).unwrap();
-        assert_eq!(parsed["extra_vars"]["report"], json!("drift"));
-        assert_eq!(
-            parsed["extra_vars"]["unified_gitops"]["application"],
-            json!("portainer")
-        );
-    }
-
-    #[test]
-    fn a_launch_whose_variables_were_ignored_is_a_failure() {
-        let n = notification(
-            "type: ascender\nevents: [drift_detected]\nascender:\n  url: https://a.example.com\n  job_template: 5\n  trigger: launch\n  credentials: [t]\n",
-        );
-        let ignored = OutboundResponse {
-            status: 201,
-            body: r#"{"job": 77, "ignored_fields": {"extra_vars": {"unified_gitops": {}}}}"#.into(),
+    fn any_2xx_is_taken_and_anything_else_says_why() {
+        let queued = OutboundResponse {
+            status: 202,
+            body: r#"{"message": "Job queued."}"#.into(),
         };
-        assert!(
-            interpret(&n, &ignored)
-                .unwrap_err()
-                .contains("Prompt on launch")
-        );
-        let started = OutboundResponse {
-            status: 201,
-            body: r#"{"job": 77, "id": 77}"#.into(),
-        };
-        assert_eq!(interpret(&n, &started).unwrap(), Some("77".to_string()));
+        assert!(interpret(&queued).is_ok());
         let refused = OutboundResponse {
             status: 403,
             body: r#"{"detail": "You do not have permission"}"#.into(),
         };
-        assert!(interpret(&n, &refused).unwrap_err().starts_with("HTTP 403"));
-    }
-
-    #[test]
-    fn the_log_keeps_the_newest_sends_first_and_bounded() {
-        let log = DeliveryLog::default();
-        for i in 0..(DELIVERY_HISTORY as u64 + 5) {
-            log.record(
-                "n",
-                Delivery {
-                    event: "test".into(),
-                    application: None,
-                    at: i,
-                    ok: true,
-                    attempts: 1,
-                    status: Some(202),
-                    job: None,
-                    error: None,
-                },
-            );
-        }
-        let history = log.history("n");
-        assert_eq!(history.len(), DELIVERY_HISTORY);
-        assert_eq!(history[0].at, DELIVERY_HISTORY as u64 + 4);
-        assert_eq!(log.last("n").unwrap().at, history[0].at);
-        assert!(log.history("other").is_empty());
+        assert!(interpret(&refused).unwrap_err().starts_with("HTTP 403"));
     }
 
     #[test]

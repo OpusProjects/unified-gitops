@@ -32,7 +32,7 @@ pub struct ApiIndex {
     pub connectors: Option<&'static str>,
     /// Admin-only; absent for a restricted key
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub notifications: Option<&'static str>,
+    pub webhooks: Option<&'static str>,
     /// Admin-only route; absent for a restricted key
     #[serde(skip_serializing_if = "Option::is_none")]
     pub projects: Option<&'static str>,
@@ -74,7 +74,7 @@ pub async fn api_index(
         applications: "/api/v1/applications",
         search: "/api/v1/search",
         connectors: admin.then_some("/api/v1/connectors"),
-        notifications: admin.then_some("/api/v1/notifications"),
+        webhooks: admin.then_some("/api/v1/webhooks"),
         projects: admin.then_some("/api/v1/projects"),
         // Same condition the config handlers enforce: the routes exist in the
         // router either way, and answer 403 when no store is configured.

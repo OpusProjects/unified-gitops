@@ -8,13 +8,13 @@ use std::time::Duration;
 use tower::ServiceExt;
 
 use unified_gitops::adapters::out::secrets::mock::MockSecrets;
-use unified_gitops::ports::notifier::{
+use unified_gitops::ports::http_sender::{
     HttpSenderPort, OutboundRequest, OutboundResponse, SendFuture,
 };
 
-// Notifications through the real router and the example connector: a sync
+// Webhooks through the real router and the example connector: a sync
 // that applies a commit sends sync_succeeded to the receiver, with the
-// credential where the notification says; a failing check sends sync_failed;
+// credential where the webhook says; a failing check sends sync_failed;
 // the API lists the last send and sends a test.
 
 #[derive(Default)]
@@ -90,7 +90,7 @@ fn fixture() -> Fixture {
     };
     let project: unified_gitops::domain::project::GitProject =
         serde_saphyr::from_str("git_url: https://example.com/state.git\n").unwrap();
-    let hook: unified_gitops::domain::notification::Notification = serde_saphyr::from_str(
+    let hook: unified_gitops::domain::webhook::Webhook = serde_saphyr::from_str(
         "type: webhook\nevents: [sync_succeeded, sync_failed]\napplications: all\nwebhook:\n  url: https://hooks.example.com/services/T0/secret-path\n  credentials: [cred-hook]\n  retries: 0\n",
     )
     .unwrap();
@@ -112,7 +112,7 @@ fn fixture() -> Fixture {
             HashMap::from([("prj-state".to_string(), project)]),
             projects.path().to_path_buf(),
         )
-        .notifications(HashMap::from([("hook".to_string(), hook)]))
+        .webhooks(HashMap::from([("hook".to_string(), hook)]))
         .secrets(Arc::new(
             MockSecrets::new().with("cred-hook", [("token", "hook-token")]),
         ))
@@ -120,7 +120,7 @@ fn fixture() -> Fixture {
         .state_dir(state.path().to_path_buf())
         .api_key(Some("admin-secret".into()))
         .build_with_state();
-    app_state.start_notifier();
+    app_state.start_webhooks();
 
     Fixture {
         app,
@@ -178,7 +178,7 @@ async fn a_sync_that_applies_a_change_sends_sync_succeeded() {
     assert_eq!(body["cause"], "commit");
     assert_eq!(body["applied"], 1);
     assert_eq!(body["changes"][0]["kind"], "namespace");
-    assert_eq!(body["notification"], "hook");
+    assert_eq!(body["webhook"], "hook");
 
     // A second sync finds nothing to do: nothing more is sent.
     let (_, again) = call(&f.app, "POST", "/api/v1/applications/app-demo/sync").await;
@@ -187,15 +187,15 @@ async fn a_sync_that_applies_a_change_sends_sync_succeeded() {
     assert_eq!(f.recorder.sent.lock().unwrap().len(), 1);
 
     // The list shows the last send, and where it went without its path.
-    let (status, list) = call(&f.app, "GET", "/api/v1/notifications").await;
+    let (status, list) = call(&f.app, "GET", "/api/v1/webhooks").await;
     assert_eq!(status, StatusCode::OK, "{list}");
     assert_eq!(list[0]["name"], "hook");
     assert_eq!(list[0]["destination"], "https://hooks.example.com");
     // How it sends, never a value: a bearer token (a credential, auth left
     // out), the default message, no signature.
-    assert_eq!(list[0]["webhook"]["auth"], "bearer");
-    assert_eq!(list[0]["webhook"]["method"], "POST");
-    assert_eq!(list[0]["webhook"]["templated"], false);
+    assert_eq!(list[0]["request"]["auth"], "bearer");
+    assert_eq!(list[0]["request"]["method"], "POST");
+    assert_eq!(list[0]["request"]["templated"], false);
     assert_eq!(list[0]["retries"], 0);
     assert_eq!(list[0]["timeout_seconds"], 30);
     assert!(!list.to_string().contains("hook-token"));
@@ -224,7 +224,7 @@ async fn a_failing_check_sends_sync_failed_once() {
 #[tokio::test]
 async fn send_test_sends_now_and_answers_the_outcome() {
     let f = fixture();
-    let (status, delivery) = call(&f.app, "POST", "/api/v1/notifications/hook/test").await;
+    let (status, delivery) = call(&f.app, "POST", "/api/v1/webhooks/hook/test").await;
     assert_eq!(status, StatusCode::OK, "{delivery}");
     assert_eq!(delivery["ok"], true);
     assert_eq!(delivery["event"], "test");
@@ -233,16 +233,16 @@ async fn send_test_sends_now_and_answers_the_outcome() {
     assert_eq!(body["event"], "test");
 
     // Kept in its history, newest first.
-    call(&f.app, "POST", "/api/v1/notifications/hook/test").await;
-    let (status, detail) = call(&f.app, "GET", "/api/v1/notifications/hook").await;
+    call(&f.app, "POST", "/api/v1/webhooks/hook/test").await;
+    let (status, detail) = call(&f.app, "GET", "/api/v1/webhooks/hook").await;
     assert_eq!(status, StatusCode::OK, "{detail}");
     assert_eq!(detail["name"], "hook");
     assert_eq!(detail["history"].as_array().unwrap().len(), 2);
     assert_eq!(detail["history"][0]["event"], "test");
-    let (status, _) = call(&f.app, "GET", "/api/v1/notifications/nope").await;
+    let (status, _) = call(&f.app, "GET", "/api/v1/webhooks/nope").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    let (status, _) = call(&f.app, "POST", "/api/v1/notifications/nope/test").await;
+    let (status, _) = call(&f.app, "POST", "/api/v1/webhooks/nope/test").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -277,7 +277,7 @@ async fn the_http_sender_delivers_and_does_not_follow_redirects() {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, receiver).await.unwrap() });
 
-    let sender = unified_gitops::adapters::out::notify::http::ReqwestSender::new();
+    let sender = unified_gitops::adapters::out::webhooks::http::ReqwestSender::new();
     let request = |path: &str| OutboundRequest {
         method: "POST".into(),
         url: format!("http://{addr}{path}"),

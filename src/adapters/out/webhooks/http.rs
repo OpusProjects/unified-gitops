@@ -1,4 +1,4 @@
-use crate::ports::notifier::{HttpSenderPort, OutboundRequest, OutboundResponse, SendFuture};
+use crate::ports::http_sender::{HttpSenderPort, OutboundRequest, OutboundResponse, SendFuture};
 
 // How much of an answer is kept: a receiver's error message or a job id, not
 // whatever page a misconfigured URL returns.

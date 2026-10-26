@@ -1,7 +1,7 @@
-# Notifications
+# Webhooks
 
-A notification tells another system what happened to an application: drift found, a commit applied,
-a sync that failed. It is a configuration item like the others, under `notifications:`. Every send
+A webhook tells another system what happened to an application: drift found, a commit applied,
+a sync that failed. It is a configuration item like the others, under `webhooks:`. Every send
 goes out from this instance, so nothing has to reach in.
 
 - [Events](#events)
@@ -36,9 +36,9 @@ Each run produces at most one event, so one change never arrives twice under two
 The `type` names the receiver, and its settings live in the block of the same name.
 
 ```yaml
-# notifications/ntf-failures.yaml
-notifications:
-  - name: ntf-failures
+# webhooks/wh-failures.yaml
+webhooks:
+  - name: wh-failures
     description: "Any application that fails"
     type: webhook
     events: [sync_failed, back_in_sync]
@@ -75,7 +75,8 @@ notifications:
 - **Never in the YAML:** a token, a password, or a URL that carries one. They belong in
   credentials, which come from env vars or Vault.
 
-The `ascender` and `awx` types start a job template; see [Ascender and AWX](#ascender-and-awx).
+The `ascender` and `awx` types start a job template through its webhook; see
+[Ascender and AWX](#ascender-and-awx).
 
 ## The message
 
@@ -84,7 +85,7 @@ The default body, and the fields a `body` template can use:
 ```json
 {
   "event": "drift_detected",
-  "notification": "ntf-ascender-drift",
+  "webhook": "wh-ascender-drift",
   "application": "portainer",
   "description": "Portainer settings, environments and users",
   "status": "synced",
@@ -110,13 +111,13 @@ The default body, and the fields a `body` template can use:
 
 ## Ascender and AWX
 
-Both start a job template (or a workflow job template) in two ways. Their routes are the same today;
-they are separate types so each follows its own product.
+Both start a job template (or a workflow job template) through the template's own webhook receiver.
+Their routes are the same today; they are separate types so each follows its own product.
 
 ```yaml
-# notifications/ntf-ascender-drift.yaml
-notifications:
-  - name: ntf-ascender-drift
+# webhooks/wh-ascender-drift.yaml
+webhooks:
+  - name: wh-ascender-drift
     description: "Drift report in Ascender"
     type: ascender                       # or awx, with an awx: block
     events: [drift_detected]
@@ -124,22 +125,16 @@ notifications:
     ascender:
       url: "https://ascender.example.com"   # the controller, without /api
       job_template: 123                  # or workflow_job_template: 45
-      trigger: webhook                   # webhook (default) | launch
-      credentials: [cred-ascender-jt123]
-      # extra_vars: {report: drift}      # launch only
+      credentials: [cred-ascender-jt123] # its token is the template's webhook key
 ```
 
-| `trigger` | Route | The credential's `token` | The playbook reads the message as |
-| --- | --- | --- | --- |
-| `webhook` | `/api/v2/job_templates/{id}/gitlab/` | The template's webhook key | `ascender_webhook_payload` (Ascender), `tower_webhook_payload` (both) |
-| `launch` | `/api/v2/job_templates/{id}/launch/` | A user's OAuth token | `unified_gitops`, beside `extra_vars` |
-
-- **`webhook`** needs the template's **Webhooks** option on, with service **GitLab**: the
-  controller then gives it a key, compared as is, and no user is needed. Any event is accepted.
-- **`launch`** needs a user allowed to run the template, and **Prompt on launch** for its variables.
-  Without it the controller drops `extra_vars`; the send reports that as a failure instead of
-  starting a job without the event.
-- The last send records the job a `launch` started.
+- **On the template:** turn its **Webhooks** option on, with service **GitLab**. The controller then
+  gives it a key; put that in a credential, from Vault. No user and no token are needed, and the key
+  can start that one template only.
+- **The send:** `POST /api/v2/job_templates/{id}/gitlab/` with the key in `X-Gitlab-Token`, compared
+  as is, and the message as the body. Any event is accepted.
+- **In the playbook:** the message is `ascender_webhook_payload` (Ascender), `awx_webhook_payload`
+  (AWX), or `tower_webhook_payload` (both).
 
 ## Sending, retries and what is kept
 
@@ -149,11 +144,11 @@ notifications:
 - **Retries:** an unanswered send, a `429` or a `5xx` is retried `retries` times, waiting 2, 4, 8 …
   up to 60 seconds. A `4xx` is not: a wrong key or template does not fix itself.
 - **Redirects are not followed:** the body and its credential go only where the configuration says.
-- **What is kept:** each notification's last 50 sends (event, application, result, status, job,
-  error), in memory: the last on `GET /api/v1/notifications`, all of them on
-  `GET /api/v1/notifications/{id}`. `POST /api/v1/notifications/{id}/test` sends a test message
+- **What is kept:** each webhook's last 50 sends (event, application, result, status,
+  error), in memory: the last on `GET /api/v1/webhooks`, all of them on
+  `GET /api/v1/webhooks/{id}`. `POST /api/v1/webhooks/{id}/test` sends a test message
   now, once, and answers the outcome.
-- **Metrics:** `unified_gitops_notifications_total{notification,event,outcome}` (`success`,
-  `error`, `dropped`) and `unified_gitops_notification_duration_seconds`.
-- **Reload:** notifications reload like applications. A message keeps the definition it was queued
+- **Metrics:** `unified_gitops_webhooks_total{webhook,event,outcome}` (`success`,
+  `error`, `dropped`) and `unified_gitops_webhook_duration_seconds`.
+- **Reload:** webhooks reload like applications. A message keeps the definition it was queued
   with.

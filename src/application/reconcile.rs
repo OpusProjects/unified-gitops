@@ -28,8 +28,8 @@ pub struct Catalog<'a> {
     pub applications: &'a HashMap<String, Application>,
     pub connectors: &'a HashMap<String, Connector>,
     pub projects: &'a HashMap<String, GitProject>,
-    pub notifications: &'a HashMap<String, crate::domain::notification::Notification>,
-    // server.url, for links in notifications.
+    pub webhooks: &'a HashMap<String, crate::domain::webhook::Webhook>,
+    // server.url, for links in webhooks.
     pub url: Option<&'a str>,
 }
 
@@ -48,8 +48,8 @@ pub struct Reconciler<'a> {
     pub project_health: &'a SyncHealthRegistry,
     // What each connector last described, for search.
     pub described: &'a crate::domain::connector::DescribedKinds,
-    // Queues what a run has to tell (application::notify).
-    pub notifier: &'a crate::application::notify::Dispatcher,
+    // Queues what a run has to tell (application::webhooks).
+    pub dispatcher: &'a crate::application::webhooks::Dispatcher,
 }
 
 // Pull the application's project, then reconcile. What every run should do —
@@ -392,11 +392,11 @@ async fn reconcile_tree(
     // Where it stood before this run, read before the run is recorded over it.
     let before = r.states.baseline(app_id);
     r.states.record(app_id, status, snapshot, record.clone());
-    if let Some(detected) = crate::application::notify::detect(&before, &record, status) {
-        crate::application::notify::after_run(
-            r.notifier,
-            catalog.notifications,
-            &crate::application::notify::RunOutcome {
+    if let Some(detected) = crate::application::webhooks::detect(&before, &record, status) {
+        crate::application::webhooks::after_run(
+            r.dispatcher,
+            catalog.webhooks,
+            &crate::application::webhooks::RunOutcome {
                 application: app_id,
                 description: app.description.as_deref(),
                 base_url: catalog.url,

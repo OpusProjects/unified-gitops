@@ -8,20 +8,20 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::adapters::r#in::http::auth::AuthContext;
 use crate::adapters::r#in::http::error::{ApiError, ErrorBody};
-use crate::application::notify::{self, Delivery, Job};
-use crate::domain::notification::{Event, JobTrigger, NotificationType};
+use crate::application::webhooks::{self, Delivery, Job};
+use crate::domain::webhook::{Event, WebhookType};
 
-// Notifications: which events go where, and how the last send went.
-// Admin-only, like connectors: a notification can name any application, and
+// Webhooks: which events go where, and how the last send went.
+// Admin-only, like connectors: a webhook can name any application, and
 // its destination says where this instance reaches out to.
 
 #[derive(Serialize, ToSchema)]
-pub struct NotificationInfo {
+pub struct WebhookSummary {
     /// The item's identity, as in the configuration
     pub name: String,
     pub description: Option<String>,
     #[serde(rename = "type")]
-    pub notification_type: NotificationType,
+    pub webhook_type: WebhookType,
     pub events: Vec<Event>,
     /// Every application, present and future (`applications: all`)
     pub all_applications: bool,
@@ -34,25 +34,20 @@ pub struct NotificationInfo {
     /// ascender and awx: the job template (or workflow job template) it starts
     pub job_template: Option<u64>,
     pub workflow_job_template: Option<u64>,
-    /// ascender and awx: through the template's webhook receiver or its launch API
-    pub trigger: Option<JobTrigger>,
     pub credentials: Vec<String>,
     /// How long one attempt may take, and how many times a send is retried
     pub timeout_seconds: u64,
     pub retries: u32,
-    /// webhook: its HTTP method, how the credential is sent, the names of
-    /// its fixed headers (never their values), whether it sends a template or
-    /// the default message, and the header its signature goes in, if signed
-    pub webhook: Option<WebhookInfo>,
-    /// ascender and awx, trigger launch: the names of the extra_vars it adds
-    /// beside the event (never their values)
-    pub extra_vars: Vec<String>,
+    /// type webhook: its HTTP method, how the credential is sent, the names
+    /// of its fixed headers (never their values), whether it sends a template
+    /// or the default message, and the header its signature goes in, if signed
+    pub request: Option<RequestInfo>,
     /// The last send since this process started, if any
     pub last: Option<Delivery>,
 }
 
 #[derive(Serialize, ToSchema)]
-pub struct WebhookInfo {
+pub struct RequestInfo {
     pub method: String,
     /// bearer, basic, none, or header (the credential in `auth_header`)
     pub auth: String,
@@ -65,23 +60,23 @@ pub struct WebhookInfo {
 
 #[utoipa::path(
     get,
-    path = "/api/v1/notifications",
-    tag = "Notifications",
+    path = "/api/v1/webhooks",
+    tag = "Webhooks",
     responses(
-        (status = 200, description = "Every notification: its events, applications and destination, and its last send", body = Vec<NotificationInfo>),
+        (status = 200, description = "Every webhook: its events, applications and destination, and its last send", body = Vec<WebhookSummary>),
         (status = 403, description = "API key is not admin", body = ErrorBody)
     )
 )]
-pub async fn list_notifications(
+pub async fn list_webhooks(
     State(state): State<Arc<AppState>>,
     axum::Extension(auth): axum::Extension<AuthContext>,
-) -> Result<Json<Vec<NotificationInfo>>, ApiError> {
+) -> Result<Json<Vec<WebhookSummary>>, ApiError> {
     if !auth.permissions.is_admin() {
         return Err(ApiError::admin_only());
     }
     let config = state.config();
-    let mut out: Vec<NotificationInfo> = config
-        .notifications
+    let mut out: Vec<WebhookSummary> = config
+        .webhooks
         .iter()
         .map(|(id, n)| info(&state, id, n))
         .collect();
@@ -89,26 +84,21 @@ pub async fn list_notifications(
     Ok(Json(out))
 }
 
-// One notification as the list shows it.
-fn info(
-    state: &AppState,
-    id: &str,
-    n: &crate::domain::notification::Notification,
-) -> NotificationInfo {
+// One webhook as the list shows it.
+fn info(state: &AppState, id: &str, n: &crate::domain::webhook::Webhook) -> WebhookSummary {
     let target = n.ascender.as_ref().or(n.awx.as_ref());
     let mut applications = n.applications.named().to_vec();
     applications.sort();
-    NotificationInfo {
+    WebhookSummary {
         name: id.to_string(),
         description: n.description.clone(),
-        notification_type: n.notification_type,
+        webhook_type: n.webhook_type,
         events: n.events.clone(),
         all_applications: n.applications.is_all(),
         applications,
         destination: n.destination(),
         job_template: target.and_then(|t| t.job_template),
         workflow_job_template: target.and_then(|t| t.workflow_job_template),
-        trigger: target.map(|t| t.trigger),
         credentials: n.credentials().to_vec(),
         timeout_seconds: n
             .webhook
@@ -122,8 +112,8 @@ fn info(
             .map(|w| w.retries)
             .or(target.map(|t| t.retries))
             .unwrap_or_default(),
-        webhook: n.webhook.as_ref().map(|w| {
-            use crate::domain::notification::{Auth, AuthScheme};
+        request: n.webhook.as_ref().map(|w| {
+            use crate::domain::webhook::{Auth, AuthScheme};
             let (auth, auth_header) = match &w.auth {
                 Auth::Header { header } => ("header", Some(header.clone())),
                 Auth::Scheme(AuthScheme::Basic) => ("basic", None),
@@ -133,7 +123,7 @@ fn info(
                 Auth::Default if w.credentials.is_empty() => ("none", None),
                 Auth::Default => ("bearer", None),
             };
-            WebhookInfo {
+            RequestInfo {
                 method: w.method.clone(),
                 auth: auth.to_string(),
                 auth_header,
@@ -142,17 +132,14 @@ fn info(
                 signature_header: w.sign.as_ref().map(|s| s.header.clone()),
             }
         }),
-        extra_vars: target
-            .map(|t| t.extra_vars.keys().cloned().collect())
-            .unwrap_or_default(),
-        last: state.notifier.log.last(id),
+        last: state.dispatcher.log.last(id),
     }
 }
 
 #[derive(Serialize, ToSchema)]
-pub struct NotificationDetail {
+pub struct WebhookDetail {
     #[serde(flatten)]
-    pub notification: NotificationInfo,
+    pub summary: WebhookSummary,
     /// Its sends since this process started, newest first, at most 50.
     /// Retries of one message count as one send
     pub history: Vec<Delivery>,
@@ -160,47 +147,47 @@ pub struct NotificationDetail {
 
 #[utoipa::path(
     get,
-    path = "/api/v1/notifications/{id}",
-    tag = "Notifications",
-    params(("id" = String, Path, description = "Notification name")),
+    path = "/api/v1/webhooks/{id}",
+    tag = "Webhooks",
+    params(("id" = String, Path, description = "Webhook name")),
     responses(
-        (status = 200, description = "One notification, with its recent sends", body = NotificationDetail),
+        (status = 200, description = "One webhook, with its recent sends", body = WebhookDetail),
         (status = 403, description = "API key is not admin", body = ErrorBody),
-        (status = 404, description = "No such notification", body = ErrorBody)
+        (status = 404, description = "No such webhook", body = ErrorBody)
     )
 )]
-pub async fn get_notification(
+pub async fn get_webhook(
     State(state): State<Arc<AppState>>,
     axum::Extension(auth): axum::Extension<AuthContext>,
     Path(id): Path<String>,
-) -> Result<Json<NotificationDetail>, ApiError> {
+) -> Result<Json<WebhookDetail>, ApiError> {
     if !auth.permissions.is_admin() {
         return Err(ApiError::admin_only());
     }
     let config = state.config();
-    let Some(n) = config.notifications.get(&id) else {
+    let Some(n) = config.webhooks.get(&id) else {
         return Err(ApiError::not_found(format!(
-            "notification '{id}' is not configured"
+            "webhook '{id}' is not configured"
         )));
     };
-    Ok(Json(NotificationDetail {
-        notification: info(&state, &id, n),
-        history: state.notifier.log.history(&id),
+    Ok(Json(WebhookDetail {
+        summary: info(&state, &id, n),
+        history: state.dispatcher.log.history(&id),
     }))
 }
 
 #[utoipa::path(
     post,
-    path = "/api/v1/notifications/{id}/test",
-    tag = "Notifications",
-    params(("id" = String, Path, description = "Notification name")),
+    path = "/api/v1/webhooks/{id}/test",
+    tag = "Webhooks",
+    params(("id" = String, Path, description = "Webhook name")),
     responses(
-        (status = 200, description = "Sent once, now, without retrying: the outcome, also kept as the notification's last send", body = Delivery),
+        (status = 200, description = "Sent once, now, without retrying: the outcome, also kept as the webhook's last send", body = Delivery),
         (status = 403, description = "API key is not admin", body = ErrorBody),
-        (status = 404, description = "No such notification", body = ErrorBody)
+        (status = 404, description = "No such webhook", body = ErrorBody)
     )
 )]
-pub async fn test_notification(
+pub async fn test_webhook(
     State(state): State<Arc<AppState>>,
     axum::Extension(auth): axum::Extension<AuthContext>,
     headers: HeaderMap,
@@ -210,20 +197,20 @@ pub async fn test_notification(
         return Err(ApiError::admin_only());
     }
     let config = state.config();
-    let Some(notification) = config.notifications.get(&id) else {
+    let Some(webhook) = config.webhooks.get(&id) else {
         return Err(ApiError::not_found(format!(
-            "notification '{id}' is not configured"
+            "webhook '{id}' is not configured"
         )));
     };
-    let mut message = notify::test_message(&id, config.url.as_deref());
-    message.insert("notification".into(), serde_json::json!(id));
-    let delivery = notify::deliver(
+    let mut message = webhooks::test_message(&id, config.url.as_deref());
+    message.insert("webhook".into(), serde_json::json!(id));
+    let delivery = webhooks::deliver(
         &*state.secrets,
         &*state.http,
-        &state.notifier.log,
+        &state.dispatcher.log,
         Job {
-            notification_id: id.clone(),
-            notification: notification.clone(),
+            webhook_id: id.clone(),
+            webhook: webhook.clone(),
             message,
         },
         false,
@@ -232,7 +219,7 @@ pub async fn test_notification(
     crate::adapters::r#in::http::audit::record(
         &auth,
         &headers,
-        "notification_test",
+        "webhook_test",
         &id,
         if delivery.ok { "success" } else { "error" },
     );

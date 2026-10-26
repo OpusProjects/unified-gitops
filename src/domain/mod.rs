@@ -4,11 +4,11 @@ pub mod connector;
 pub mod credential;
 pub mod desired;
 pub mod ldap;
-pub mod notification;
 pub mod plan;
 pub mod project;
 pub mod run;
 pub mod sync_health;
+pub mod webhook;
 pub mod yaml;
 
 // Default timeout for git pulls and other bounded work.

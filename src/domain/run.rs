@@ -183,7 +183,7 @@ struct Entry {
     status: Option<SyncStatus>,
     revision: Option<String>,
     // The commit the application was last found in sync at. Differences found
-    // at that same commit were made outside git: drift (application::notify).
+    // at that same commit were made outside git: drift (application::webhooks).
     synced_revision: Option<String>,
     plan: Option<PlanSnapshot>,
     history: VecDeque<RunRecord>,
@@ -249,7 +249,7 @@ impl AppStateRegistry {
         }
     }
 
-    // Where the application stood before a run: what notifications compare
+    // Where the application stood before a run: what webhooks compare
     // the run's outcome with.
     pub fn baseline(&self, app_id: &str) -> Baseline {
         let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());

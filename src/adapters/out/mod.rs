@@ -4,7 +4,7 @@ pub mod config;
 pub mod connectors;
 pub mod directory;
 pub mod git;
-pub mod notify;
+pub mod webhooks;
 // Not a port implementation: the scrubbed-environment Command builder shared
 // by every adapter that spawns a local script.
 pub(crate) mod process_env;

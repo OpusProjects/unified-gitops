@@ -53,7 +53,7 @@ pub struct ConfigSummary {
     pub credentials: usize,
     pub projects: usize,
     pub api_keys: usize,
-    pub notifications: usize,
+    pub webhooks: usize,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -117,7 +117,7 @@ pub struct ReloadInfo {
     pub connectors: DeltaInfo,
     pub projects: DeltaInfo,
     pub credentials: DeltaInfo,
-    pub notifications: DeltaInfo,
+    pub webhooks: DeltaInfo,
     /// How many API keys are in force after the reload
     pub api_keys: usize,
 }
@@ -253,7 +253,7 @@ fn summarize(cfg: &AppConfig) -> ConfigSummary {
         credentials: cfg.credentials.len(),
         projects: cfg.projects.len(),
         api_keys: cfg.api_keys.len(),
-        notifications: cfg.notifications.len(),
+        webhooks: cfg.webhooks.len(),
     }
 }
 
@@ -266,7 +266,7 @@ fn reload_info(report: &reload_use_case::ReloadReport, api_keys: usize) -> Reloa
         connectors: (&report.connectors).into(),
         projects: (&report.projects).into(),
         credentials: (&report.credentials).into(),
-        notifications: (&report.notifications).into(),
+        webhooks: (&report.webhooks).into(),
         api_keys,
     }
 }

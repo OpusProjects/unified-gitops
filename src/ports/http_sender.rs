@@ -2,8 +2,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-// One HTTP request, built whole by application::notify: the adapter only
-// carries it, so what a notification sends is decided (and tested) in one
+// One HTTP request, built whole by application::webhooks: the adapter only
+// carries it, so what a webhook sends is decided (and tested) in one
 // place, without a network.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutboundRequest {
@@ -24,7 +24,7 @@ pub struct OutboundResponse {
 pub type SendFuture<'a> =
     Pin<Box<dyn Future<Output = Result<OutboundResponse, String>> + Send + 'a>>;
 
-// Sends notifications. Err is a request that got no answer (refused, timed
+// Sends webhooks. Err is a request that got no answer (refused, timed
 // out, TLS); any answer, error statuses included, is Ok, and the caller
 // decides what it means for its receiver.
 pub trait HttpSenderPort: Send + Sync {
