@@ -1,0 +1,6 @@
+# cargo-audit configuration, honored by both local `cargo audit` and the
+# rustsec/audit-check CI job.
+[advisories]
+# No exceptions: every advisory in the tree fails the build. (unified-api
+# ignores RUSTSEC-2023-0071 for russh's `rsa`; this project has no SSH stack.)
+ignore = []

@@ -1,0 +1,13 @@
+# Project checkouts and the local copy of each system's settings live here;
+# without the volume both are rebuilt on every pod replacement (which works —
+# it costs a boot-time clone, and the copies are rewritten at the first check).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: unified-gitops-state
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

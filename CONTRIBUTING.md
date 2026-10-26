@@ -1,0 +1,93 @@
+# Contributing to Unified GitOps
+
+Thanks for helping out! This is a small project with a few firm conventions —
+following them keeps the history clean and the architecture intact.
+
+## Workflow: one logical change per PR
+
+`main` moves only through squash-merged pull requests, one **logical change** per PR —
+a fix, a dependency bump, a doc edit each get their own. This keeps every change
+independently reviewable, bisectable, and revertable.
+
+```bash
+git checkout main && git pull
+git checkout -b <type>/<short-name>       # e.g. fix/diff-number-equality
+# ...make exactly one change, test it...
+git commit -am "Short imperative title"
+git push -u origin <type>/<short-name>
+gh pr create --base main
+```
+
+### Commit / PR message style
+
+- Title: `<type>: short imperative summary`, lowercase after the colon —
+  `feat: add the prune option to applications`, `fix: compare numbers by
+  value in the diff`. Types in use: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`,
+  `build`, `chore`.
+- Release commits are the exception: `Release x.y.z`, matching the tag.
+- Body (when the change needs explaining): plain prose, *what* and *why*, wrapped
+  at ~72 columns. The problem first, then the change.
+
+## CI gates
+
+Every PR must pass, in this order (run them locally before pushing):
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+## Architecture rules
+
+The layout is hexagonal — see [docs/architecture.md](docs/architecture.md). The two
+rules that matter when writing code:
+
+1. **Use-case logic lives in `src/application/` only.** HTTP handlers and the
+   scheduler are thin translators; if you find yourself orchestrating
+   connector-state-secrets work in a handler, move it to an application function.
+2. **Nothing reaches a system before desired state validates.** A run reads and
+   validates every file first, and only then lists or applies; keep it that way.
+3. **The diff is the core's, not the connector's.** A connector lists and applies one
+   operation; ordering, prune, drift and locks stay in `application/reconcile.rs`.
+
+Dependency direction is `adapters → application → ports → domain`, never the reverse.
+`domain/` stays pure: `std` + `serde` only.
+
+## Code comments
+
+The codebase carries **teaching comments** that explain Rust concepts to the
+maintainers. They are intentional — do not strip them when refactoring; move them
+with the code they explain. When you add a non-obvious Rust construct, a comment in
+the same spirit is welcome. Beyond those, comment only when the *why* is non-obvious.
+
+## Adding an HTTP endpoint
+
+1. Handler in the matching file under `src/adapters/in/http/` (one file per resource)
+2. Route in `src/adapters/in/http/routes.rs`
+3. Register the handler in `paths(...)` — and any response structs in
+   `components(schemas(...))` — in `src/adapters/in/http/openapi.rs`, or it won't
+   appear in Swagger
+4. Integration test in `tests/`
+
+## Releases
+
+1. One release PR: bump `version` in `Cargo.toml` (run `cargo build` so
+   `Cargo.lock` follows) and move the `Unreleased` entries in
+   [CHANGELOG.md](CHANGELOG.md) under the new version with the date.
+2. After the squash merge: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. CI runs the gates, publishes `ghcr.io/opusprojects/unified-gitops:X.Y.Z`, and
+   creates a GitHub Release with that version's CHANGELOG section as the notes.
+   Only tags publish images: `latest` always means the newest release, never
+   the tip of `main` — consumers should still pin the version tag.
+
+## Running the test suite
+
+```bash
+cargo test                # unit + integration; integration tests use the fixtures under tests/
+```
+
+The example connector (`connectors/kv.py`) and the test connectors under
+`tests/connectors/` are plain Python — no external services are needed to run the
+full suite. See [docs/testing.md](docs/testing.md) for what the suite covers, running
+a subset, and where new tests belong.

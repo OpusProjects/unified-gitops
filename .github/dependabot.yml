@@ -1,0 +1,24 @@
+version: 2
+updates:
+  # Keep the GitHub Actions used in workflows up to date
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # One PR per action bump: each lands (or fails CI) on its own, so a broken
+    # bump never blocks the rest of the week's updates.
+    # Match the commit style in CONTRIBUTING.md: "build(deps): bump ..."
+    commit-message:
+      prefix: "build"
+      include: "scope"
+
+  # Keep Rust dependencies up to date; complements the cargo-audit CI job
+  # (audit only warns, Dependabot opens the actual bump PRs)
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # One PR per crate bump, same reasoning as above
+    commit-message:
+      prefix: "build"
+      include: "scope"

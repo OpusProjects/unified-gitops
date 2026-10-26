@@ -1,0 +1,13 @@
+# A project: a git repository holding desired state, connector scripts, or both.
+# Cloned at boot and pulled before every check of an application.
+#
+# The sample desired state and the sample connector are in this repository
+# (examples/desired-state, connectors/kv.py), so the sample project is
+# unified-gitops itself. A real deployment points at its own repositories.
+projects:
+  - name: examples
+    description: "Examples"
+    git_url: "https://github.com/OpusProjects/unified-gitops.git"
+    # branch: "main"                    # default "main"
+    # credential: "cred-github"         # for private repos (token or ssh_key)
+    sync_interval_seconds: 1800

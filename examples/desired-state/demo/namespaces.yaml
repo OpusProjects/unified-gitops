@@ -1,0 +1,7 @@
+# Desired state: the objects of one kind on the application's system.
+kind: namespace
+items:
+  - name: team-a
+    description: "Team A settings"
+  - name: team-b
+    description: "Team B settings"
