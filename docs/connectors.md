@@ -64,12 +64,12 @@ code that handles the objects, once, the way a Kubernetes API server describes i
 
 ## The Python SDK
 
-The SDK, `unified_connector.py` at the root of
+The SDK, the `unified_connectors` package in
 [unified-connectors](https://github.com/OpusProjects/unified-connectors), implements the contract.
 A connector writes two functions:
 
 ```python
-from unified_connector import ConnectorError, run
+from unified_connectors import ConnectorError, run
 
 def list_objects(kind, config, credentials):
     return [...]                                  # what exists now
