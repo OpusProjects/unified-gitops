@@ -64,7 +64,9 @@ code that handles the objects, once, the way a Kubernetes API server describes i
 
 ## The Python SDK
 
-`connectors/unified_connector.py` implements the contract; a connector writes two functions:
+The SDK, `unified_connector.py` at the root of
+[unified-connectors](https://github.com/OpusProjects/unified-connectors), implements the contract.
+A connector writes two functions:
 
 ```python
 from unified_connector import ConnectorError, run
@@ -90,8 +92,8 @@ enforces the write guard, prints the
 JSON and sets the exit code. Raise `ConnectorError("…")` for a one-line message; anything else prints a
 traceback. Standard library only.
 
-`connectors/kv.py` is a complete example: a key-value store kept as JSON files in a folder, with two
-kinds (`namespace`, and `entry`, which depends on it).
+`kv/kv.py` there is a complete example: a key-value store kept as JSON files in a folder, with two
+kinds (`namespace`, and `entry`, which depends on it). This repository's tests run a copy of both.
 
 ## Declaring a connector
 
@@ -123,8 +125,9 @@ the write guard stops accidents in the script, and the system's own permissions 
 ## Testing a connector by hand
 
 ```bash
+# in a unified-connectors checkout
 export APPLICATION_CONFIG='{"dir": "/tmp/store"}'
-./connectors/kv.py describe
-./connectors/kv.py list --kind namespace
-echo '{"op":"create","object":{"name":"team-a"}}' | UNIFIED_ALLOW_WRITE=1 ./connectors/kv.py apply --kind namespace
+./kv/kv.py describe
+./kv/kv.py list --kind namespace
+echo '{"op":"create","object":{"name":"team-a"}}' | UNIFIED_ALLOW_WRITE=1 ./kv/kv.py apply --kind namespace
 ```

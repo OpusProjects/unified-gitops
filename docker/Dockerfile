@@ -44,20 +44,17 @@ RUN apt-get update && apt-get install -y \
 
 RUN groupadd -r unified && useradd -r -g unified -s /sbin/nologin unified
 
-# Writable state directory: project checkouts, the local copy of each
-# system's settings, and the demo store (the bundled config puts all three
-# here). In k8s, mount a volume over it.
+# Writable state directory: project checkouts and the local copy of each
+# system's settings. In k8s, mount a volume over it.
 RUN mkdir -p /var/lib/unified-gitops && chown unified:unified /var/lib/unified-gitops
 
 COPY --from=builder /app/target/release/unified-gitops /usr/local/bin/unified-gitops
-# Served at "/" when the config points server.ui.assets_dir here (the bundled
-# config does).
+# Served at "/" when the config points server.ui.assets_dir here.
 COPY --from=ui /ui/apps/unified-gitops/dist /usr/share/unified-gitops/ui
-COPY config/ /app/config/
-# The connector SDK and the example connector, for connectors referenced by an
-# absolute path (/app/connectors/...) rather than from a project checkout.
-COPY connectors/ /app/connectors/
 
+# No configuration is baked in: mount it at /app/config (the default
+# CONFIG_DIR, relative to this WORKDIR) or point CONFIG_DIR elsewhere.
+# Connectors come from projects (git checkouts), such as unified-connectors.
 WORKDIR /app
 
 

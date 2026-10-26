@@ -87,7 +87,7 @@ the same spirit is welcome. Beyond those, comment only when the *why* is non-obv
 cargo test                # unit + integration; integration tests use the fixtures under tests/
 ```
 
-The example connector (`connectors/kv.py`) and the test connectors under
-`tests/connectors/` are plain Python — no external services are needed to run the
+The test connectors under `tests/connectors/` (the `kv.py` example and its SDK among them) are
+plain Python — no external services are needed to run the
 full suite. See [docs/testing.md](docs/testing.md) for what the suite covers, running
 a subset, and where new tests belong.

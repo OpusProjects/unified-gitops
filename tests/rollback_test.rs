@@ -91,7 +91,7 @@ async fn rollback_applies_an_older_commit_and_pauses_until_the_next_sync() {
     let new = commit(remote.path(), 5);
 
     let connector: unified_gitops::domain::connector::Connector = serde_saphyr::from_str(&format!(
-        "path: {}/connectors/kv.py\n",
+        "path: {}/tests/connectors/kv.py\n",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap();
@@ -287,7 +287,7 @@ async fn failed_rollbacks_do_not_pause_and_checks_never_apply_over_one() {
     let new = commit_root(remote.path(), "team-a", 5);
 
     let connector: unified_gitops::domain::connector::Connector = serde_saphyr::from_str(&format!(
-        "path: {}/connectors/kv.py\n",
+        "path: {}/tests/connectors/kv.py\n",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap();

@@ -18,7 +18,7 @@ directories for checkouts and state, and call the router as a service rather tha
 | `domain/connector.rs` tests                | described kinds: `depends_on` ordering, unknown kinds and cycles refused |
 | `adapters/out/connectors/process.rs` tests | Scrubbed env, write flag only on apply, a hung connector is killed   |
 | `adapters/out/state/fs.rs` tests        | The local copy reads back exactly (strings stay strings)          |
-| `tests/reconcile_test.rs`               | The whole loop over HTTP with `connectors/kv.py`: refresh, sync in order, the local copy, drift, prune, invalid state touching nothing, restricted keys |
+| `tests/reconcile_test.rs`               | The whole loop over HTTP with `tests/connectors/kv.py`: refresh, sync in order, the local copy, drift, prune, invalid state touching nothing, restricted keys |
 | `tests/config_api_test.rs`              | The config directory over HTTP, staged validation, live reload    |
 | `tests/ldap_login_test.rs`              | Sign-in, access rules, sessions, CSRF, throttling                 |
 | the rest of `tests/`                    | git checkouts, Vault, metrics auth, UI assets, `--check-config`   |
@@ -28,4 +28,4 @@ directories for checkouts and state, and call the router as a service rather tha
 - A rule about desired state or the diff: a unit test next to it in `domain/`.
 - Something a person or pipeline does over the API: `tests/reconcile_test.rs`, through the router.
 - A connector's behaviour: test the connector script on its own (see docs/connectors.md); the core's tests
-  use `connectors/kv.py` and the two scripts in `tests/connectors/`.
+  use the scripts in `tests/connectors/` (`kv.py` and the SDK are copies from unified-connectors).
