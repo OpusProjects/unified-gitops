@@ -1,7 +1,7 @@
 # Configuration
 
-Everything is YAML in one directory (`CONFIG_DIR`, default `./config`), laid out the way AWX config
-as code is: `config.yaml` at the root holds the server settings, and every other `*.yaml` / `*.yml`
+Everything is YAML in one directory (`CONFIG_DIR`, default `./config`), one item per file:
+`config.yaml` at the root holds the server settings, and every other `*.yaml` / `*.yml`
 file, at any depth, holds items under a typed top-level key. Parsing is strict: an unknown key fails
 startup naming the file and the key. `unified-gitops --check-config` validates the directory exactly
 as startup does, and exits.
@@ -36,7 +36,7 @@ as startup does, and exits.
   read as an application.
 - **One item per file is the convention**, not a rule: a file may hold several items, of several
   types. A `name` defined twice is an error naming both files.
-- **`name` is the identity**, as in AWX: what other items reference, what the API and the state
+- **`name` is the identity**: what other items reference, what the API and the state
   directory use. Letters, digits, `-`, `_` and `.`. `description` is optional, for people.
 - **References drop the `_id`:** `connector`, `project`, `credential`, `credentials`.
 - Hidden files and folders are skipped; symlinks are followed (a ConfigMap mount is links).

@@ -27,7 +27,7 @@ network, and a change made by hand on a system shows up as drift.
 - **Self-describing connectors**: a script says what it manages, each type's key and what goes first
 - **One application, one system**: its address and credentials live in config, never in git
 - **Run history**: which commit was applied, when, and the result of every operation
-- **Config as code, AWX style**: one item per file, any folders; `name` is the identity
+- **Config as code**: one item per file, any folders; `name` is the identity
 - **Strict validation**: a typo in desired state or config fails before any system is touched
 - **Web UI and LDAP sign-in**: the same UI family and sign-in as unified-api, on its own address
 - **Secrets from Vault or env**, metrics for Prometheus, live config reload, single binary
