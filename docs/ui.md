@@ -19,8 +19,7 @@ server:
     assets_dir: "/usr/share/unified-gitops/ui"   # where the image puts the build
 ```
 
-The bundled `config/config.yaml` already has this block. `assets_dir` needs `enabled: true` (the UI
-signs in through the login page) and is restart-only.
+`assets_dir` needs `enabled: true` (the UI signs in through the login page) and is restart-only.
 
 | Path                                      | With a UI                                         | Without              |
 | ----------------------------------------- | ------------------------------------------------- | -------------------- |

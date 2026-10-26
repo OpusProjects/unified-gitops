@@ -62,9 +62,8 @@ src/
         ├── connectors/process.rs  # ConnectorPort → script (scrubbed env, APPLICATION_CONFIG, timeout kills)
         ├── state/fs.rs         # StateStorePort → <state.dir>/<application>/<kind>.yaml
         ├── git/, secrets/, directory/, config/, python.rs, process_env.rs
-connectors/                      # unified_connector.py (the Python SDK) + kv.py (example)
-examples/desired-state/       # what the bundled config reconciles
 tests/                        # integration tests; tests/connectors/ holds test connector scripts
+                              #   (kv.py + the SDK, copied from unified-connectors)
 ```
 
 ## Architecture

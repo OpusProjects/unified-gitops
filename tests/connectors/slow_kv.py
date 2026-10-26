@@ -8,5 +8,5 @@ import time
 if len(sys.argv) > 1 and sys.argv[1] == "apply":
     time.sleep(1)
 here = os.path.dirname(os.path.abspath(__file__))
-kv = os.path.join(here, "..", "..", "connectors", "kv.py")
+kv = os.path.join(here, "kv.py")
 os.execv(sys.executable, [sys.executable, kv] + sys.argv[1:])

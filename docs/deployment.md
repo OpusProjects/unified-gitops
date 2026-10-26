@@ -1,8 +1,8 @@
 # Deployment
 
 The image is `ghcr.io/opusprojects/unified-gitops:<version>`, published from version tags only. It
-holds the binary, the web UI, Python 3 with `requests`, `pyyaml` and `jinja2` for connectors, `git`, and
-the bundled demo config in `/app/config`.
+holds the binary, the web UI, Python 3 with `requests`, `pyyaml` and `jinja2` for connectors, and `git`.
+It holds no configuration: mount yours at `/app/config` (the default `CONFIG_DIR`) or set `CONFIG_DIR`.
 
 ## Docker
 

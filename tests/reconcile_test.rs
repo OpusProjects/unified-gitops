@@ -8,7 +8,7 @@ use tower::ServiceExt;
 use unified_gitops::adapters::r#in::http::auth::{Permissions, ResolvedApiKey};
 
 // The whole loop through the real router and the real example connector
-// (connectors/kv.py, a key-value store kept in a folder): desired state in a
+// (tests/connectors/kv.py, a key-value store kept in a folder): desired state in a
 // checkout, a check that reports what is out of sync, a sync that applies it,
 // the local copy of the system's settings, and drift made by hand.
 
@@ -26,7 +26,7 @@ fn write(path: &Path, body: &str) {
 }
 
 fn fixture(prune: bool) -> Fixture {
-    fixture_with(prune, "connectors/kv.py")
+    fixture_with(prune, "tests/connectors/kv.py")
 }
 
 fn fixture_with(prune: bool, script: &str) -> Fixture {

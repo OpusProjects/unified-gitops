@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Example connector: a key-value store kept as JSON files in a folder.
 
+A copy of unified-connectors kv/kv.py, kept here so the tests run offline.
+
 It stands in for a real system's API so the whole gitops loop can run on a
 laptop: an application's config names the folder (`dir`), and each kind is one file
 of objects keyed by `name`. Editing a file by hand is "someone changed the
