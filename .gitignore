@@ -4,3 +4,6 @@
 # Added by cargo
 
 /target
+
+# Python bytecode from running connectors
+__pycache__/
