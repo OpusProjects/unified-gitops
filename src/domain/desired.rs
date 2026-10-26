@@ -35,10 +35,24 @@ pub type DesiredSet = BTreeMap<String, Vec<serde_json::Map<String, Value>>>;
 pub fn key_of(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
     match object.get(key)? {
         Value::String(s) if !s.trim().is_empty() => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
+        Value::Number(n) => Some(number_key(n)),
         Value::Bool(b) => Some(b.to_string()),
         _ => None,
     }
+}
+
+// A whole number is spelled the same however it arrived: an API that returns
+// 1.0 where git says 1 names the same object, and must not plan a create (and,
+// with prune, a delete) for it. Floats with a fraction keep their spelling.
+fn number_key(n: &serde_json::Number) -> String {
+    if n.is_f64()
+        && let Some(f) = n.as_f64()
+        && f.fract() == 0.0
+        && f.abs() < 9.2e18
+    {
+        return (f as i64).to_string();
+    }
+    n.to_string()
 }
 
 pub fn parse_doc(file: &str, text: &str) -> Result<DesiredDoc, String> {
@@ -78,6 +92,28 @@ pub fn parse_doc(file: &str, text: &str) -> Result<DesiredDoc, String> {
         kind,
         items: objects,
     })
+}
+
+// The application's folder `path` inside `root` (a checkout, or a commit
+// exported for a rollback), loaded as load_dir does. The folder and every
+// folder on the way to it must be real directories: `is_dir` and `read_dir`
+// follow symlinks, so a committed link (`apps/prod -> /etc`, or into another
+// project's checkout) would otherwise make files outside the repository this
+// application's desired state.
+pub fn load_folder(root: &Path, path: &str) -> Result<Vec<DesiredDoc>, Vec<String>> {
+    let mut dir = root.to_path_buf();
+    for part in Path::new(path).components() {
+        if let std::path::Component::Normal(name) = part {
+            dir.push(name);
+            if std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink()) {
+                return Err(vec![format!(
+                    "{} is a symbolic link: desired state must be a folder in the repository",
+                    dir.display()
+                )]);
+            }
+        }
+    }
+    load_dir(&dir)
 }
 
 // Every *.yaml / *.yml under `dir`, recursively, sorted by path so the same
@@ -272,5 +308,50 @@ mod tests {
         assert_eq!(key_of(&o, "port").as_deref(), Some("8080"));
         o.insert("port".into(), Value::from(""));
         assert_eq!(key_of(&o, "port"), None);
+    }
+
+    // git says 1, the API answers 1.0: the same object, not a create plus
+    // (with prune) a delete.
+    #[test]
+    fn whole_floats_and_integers_are_the_same_key() {
+        let mut o = serde_json::Map::new();
+        o.insert("id".into(), serde_json::json!(1.0));
+        assert_eq!(key_of(&o, "id").as_deref(), Some("1"));
+        o.insert("id".into(), serde_json::json!(-7.0));
+        assert_eq!(key_of(&o, "id").as_deref(), Some("-7"));
+        o.insert("id".into(), serde_json::json!(1.5));
+        assert_eq!(key_of(&o, "id").as_deref(), Some("1.5"));
+        o.insert("id".into(), serde_json::json!(u64::MAX));
+        assert_eq!(key_of(&o, "id"), Some(u64::MAX.to_string()));
+    }
+
+    #[test]
+    fn a_symlinked_application_folder_is_refused() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("secret.yaml"),
+            "kind: k\nitems:\n  - name: x\n",
+        )
+        .unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join("apps")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("apps/prod")).unwrap();
+        // The folder itself, and a link higher up the path.
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("linked")).unwrap();
+
+        for path in ["apps/prod", "./apps/prod/", "linked"] {
+            let err = load_folder(repo.path(), path).unwrap_err();
+            assert!(err[0].contains("symbolic link"), "{path}: {err:?}");
+        }
+
+        std::fs::create_dir_all(repo.path().join("apps/dev")).unwrap();
+        std::fs::write(
+            repo.path().join("apps/dev/a.yaml"),
+            "kind: k\nitems:\n  - name: x\n",
+        )
+        .unwrap();
+        assert_eq!(load_folder(repo.path(), "apps/dev").unwrap().len(), 1);
+        // From the root, the links inside are skipped, as they always were.
+        assert_eq!(load_folder(repo.path(), ".").unwrap().len(), 1);
     }
 }

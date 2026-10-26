@@ -44,6 +44,22 @@ impl GitPort for CliGit {
                 // FETCH_HEAD instead of origin/<branch> because shallow clones
                 // don't always keep remote-tracking refs up to date.
                 debug!(dir = %dir.display(), "Updating git checkout");
+                // The remote is set from the configuration on every pull:
+                // `origin` was fixed at clone time, so a project whose git_url
+                // changed (the repository moved, or now points elsewhere)
+                // would otherwise go on reading the old one without a word.
+                run_git(
+                    &[
+                        "-C",
+                        path_str(&dir)?,
+                        "remote",
+                        "set-url",
+                        "origin",
+                        &project.git_url,
+                    ],
+                    &envs,
+                )
+                .await?;
                 run_git(
                     &[
                         "-C",
@@ -70,7 +86,7 @@ impl GitPort for CliGit {
                             message: format!("create '{}': {}", parent.display(), e),
                         })?;
                 }
-                info!(url = %project.git_url, dir = %dir.display(), branch = %project.branch, "Cloning project");
+                info!(url = %crate::domain::project::without_userinfo(&project.git_url), dir = %dir.display(), branch = %project.branch, "Cloning project");
                 // --depth 1: connector scripts only need the tip, not history
                 run_git(
                     &[
@@ -292,13 +308,16 @@ async fn run_git(args: &[&str], envs: &[(String, String)]) -> Result<(), GitErro
     })?;
 
     if !output.status.success() {
+        // A git_url may carry a token (https://bot:<token>@host/...): it is on
+        // the command line and git quotes it back in stderr, and this message
+        // ends up in the logs and in the project's sync_health on the API.
         return Err(GitError {
-            message: format!(
+            message: crate::domain::project::redact_userinfo(&format!(
                 "git {} failed ({}): {}",
                 args.join(" "),
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
-            ),
+            )),
         });
     }
 

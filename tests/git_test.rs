@@ -132,6 +132,69 @@ async fn ensure_fails_cleanly_on_bad_url() {
     assert!(err.message.contains("git clone"));
 }
 
+// A project pointed at another repository: the existing checkout follows the
+// new git_url instead of pulling the one it was cloned from.
+#[tokio::test]
+async fn ensure_follows_a_changed_git_url() {
+    let (_first, first_url) = make_origin().await;
+    let second = tempfile::tempdir().unwrap();
+    run(second.path(), &["init", "--initial-branch", "main"]).await;
+    tokio::fs::write(second.path().join("fetch.py"), "print('moved')\n")
+        .await
+        .unwrap();
+    run(second.path(), &["add", "."]).await;
+    run(second.path(), &["commit", "-m", "moved"]).await;
+    let second_url = format!("file://{}", second.path().display());
+
+    let workdir = tempfile::tempdir().unwrap();
+    let checkout = workdir.path().join("prj-test");
+    let git = CliGit::new();
+    git.ensure(&checkout, &project(&first_url), &HashMap::new())
+        .await
+        .unwrap();
+    git.ensure(&checkout, &project(&second_url), &HashMap::new())
+        .await
+        .expect("pull from the new address");
+
+    let content = tokio::fs::read_to_string(checkout.join("fetch.py"))
+        .await
+        .unwrap();
+    assert_eq!(content, "print('moved')\n");
+}
+
+// A token written into git_url is on git's command line and in its stderr;
+// neither may reach the error that is logged and shown on /api/v1/projects.
+#[tokio::test]
+async fn a_token_in_git_url_never_reaches_the_error() {
+    let workdir = tempfile::tempdir().unwrap();
+    let git = CliGit::new();
+    // No repository there: the clone fails at once, with the address (token
+    // included) on its command line.
+    let url = "file://bot:s3cr3t-token@localhost/nonexistent/repo.git";
+    let err = git
+        .ensure(
+            &workdir.path().join("prj-a"),
+            &project(url),
+            &HashMap::new(),
+        )
+        .await
+        .expect_err("nothing to clone from");
+    assert!(err.message.contains("git clone"), "{}", err.message);
+    assert!(!err.message.contains("s3cr3t-token"), "{}", err.message);
+
+    // And from a pull of an existing checkout.
+    let (_origin, origin_url) = make_origin().await;
+    let checkout = workdir.path().join("prj-b");
+    git.ensure(&checkout, &project(&origin_url), &HashMap::new())
+        .await
+        .unwrap();
+    let err = git
+        .ensure(&checkout, &project(url), &HashMap::new())
+        .await
+        .expect_err("nothing to fetch from");
+    assert!(!err.message.contains("s3cr3t-token"), "{}", err.message);
+}
+
 // =========================================================================
 // HTTP routes: on-demand project sync (admin-only)
 // =========================================================================

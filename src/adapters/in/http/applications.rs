@@ -260,31 +260,54 @@ async fn run_now(
 ) -> Result<Json<RunRecord>, ApiError> {
     let config = state.config();
     visible(&config, &auth, &id)?;
-    let record = pull_and_reconcile(
-        &state.reconciler(),
-        &config.catalog(),
-        &id,
-        mode,
-        Trigger::Manual,
-    )
-    .await
+    let record = detached(async move {
+        let record = pull_and_reconcile(
+            &state.reconciler(),
+            &config.catalog(),
+            &id,
+            mode,
+            Trigger::Manual,
+        )
+        .await?;
+        crate::adapters::r#in::http::audit::record(
+            &auth,
+            &headers,
+            match mode {
+                RunMode::Plan => "application_refresh",
+                RunMode::Apply => "application_sync",
+            },
+            &id,
+            match record.result {
+                crate::domain::run::RunResult::Succeeded => "success",
+                crate::domain::run::RunResult::OutOfSync => "out_of_sync",
+                crate::domain::run::RunResult::Partial => "partial",
+                crate::domain::run::RunResult::Failed => "error",
+            },
+        );
+        Ok::<_, String>(record)
+    })
+    .await?
     .map_err(ApiError::not_found)?;
-    crate::adapters::r#in::http::audit::record(
-        &auth,
-        &headers,
-        match mode {
-            RunMode::Plan => "application_refresh",
-            RunMode::Apply => "application_sync",
-        },
-        &id,
-        match record.result {
-            crate::domain::run::RunResult::Succeeded => "success",
-            crate::domain::run::RunResult::OutOfSync => "out_of_sync",
-            crate::domain::run::RunResult::Partial => "partial",
-            crate::domain::run::RunResult::Failed => "error",
-        },
-    );
     Ok(Json(record))
+}
+
+// Runs a sync or a rollback to its end whatever happens to the request.
+// axum drops a handler's future when the client goes away (a proxy timeout,
+// Ctrl-C on curl, a browser navigating off), and a run dropped mid-apply stops
+// between operations, kills the connector that is writing, and records
+// nothing: no history entry for what it did change, and for a rollback no
+// pause, so the next check reverts it silently.
+//
+// tokio::spawn makes the run its own task, which a dropped handle does not
+// cancel; the handler only waits for it. That needs everything moved in
+// (`async move` and 'static), hence the Arc<AppState> and the config snapshot
+// moved rather than borrowed.
+async fn detached<T: Send + 'static>(
+    run: impl std::future::Future<Output = T> + Send + 'static,
+) -> Result<T, ApiError> {
+    tokio::spawn(run)
+        .await
+        .map_err(|e| ApiError::internal(format!("the run did not finish: {e}")))
 }
 
 #[utoipa::path(
@@ -349,25 +372,29 @@ pub async fn rollback_application(
 ) -> Result<Json<RunRecord>, ApiError> {
     let config = state.config();
     visible(&config, &auth, &id)?;
-    let result = crate::application::reconcile::rollback(
-        &state.reconciler(),
-        &config.catalog(),
-        &id,
-        body.revision.trim(),
-    )
-    .await;
-    let outcome = match &result {
-        Ok(record) if record.result == crate::domain::run::RunResult::Succeeded => "success",
-        Ok(record) if record.result == crate::domain::run::RunResult::Partial => "partial",
-        _ => "error",
-    };
-    crate::adapters::r#in::http::audit::record(
-        &auth,
-        &headers,
-        "application_rollback",
-        &format!("{id}@{}", body.revision.trim()),
-        outcome,
-    );
+    let result = detached(async move {
+        let result = crate::application::reconcile::rollback(
+            &state.reconciler(),
+            &config.catalog(),
+            &id,
+            body.revision.trim(),
+        )
+        .await;
+        let outcome = match &result {
+            Ok(record) if record.result == crate::domain::run::RunResult::Succeeded => "success",
+            Ok(record) if record.result == crate::domain::run::RunResult::Partial => "partial",
+            _ => "error",
+        };
+        crate::adapters::r#in::http::audit::record(
+            &auth,
+            &headers,
+            "application_rollback",
+            &format!("{id}@{}", body.revision.trim()),
+            outcome,
+        );
+        result
+    })
+    .await?;
     result.map(Json).map_err(ApiError::bad_request)
 }
 

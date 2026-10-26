@@ -26,6 +26,10 @@ fn write(path: &Path, body: &str) {
 }
 
 fn fixture(prune: bool) -> Fixture {
+    fixture_with(prune, "connectors/kv.py")
+}
+
+fn fixture_with(prune: bool, script: &str) -> Fixture {
     let projects = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
@@ -39,11 +43,9 @@ fn fixture(prune: bool) -> Fixture {
         "kind: entry\nitems:\n  - name: timeout\n    namespace: team-a\n    value: \"0030\"\n  - name: retries\n    namespace: team-a\n    value: 3\n",
     );
 
-    let connector: unified_gitops::domain::connector::Connector = serde_saphyr::from_str(&format!(
-        "path: {}/connectors/kv.py\n",
-        env!("CARGO_MANIFEST_DIR")
-    ))
-    .unwrap();
+    let connector: unified_gitops::domain::connector::Connector =
+        serde_saphyr::from_str(&format!("path: {}/{script}\n", env!("CARGO_MANIFEST_DIR")))
+            .unwrap();
     // Both applications reach the same store: one system, two owners.
     let app_def = |prune: bool| -> unified_gitops::domain::app::Application {
         serde_saphyr::from_str(&format!(
@@ -270,6 +272,95 @@ async fn prune_deletes_what_git_no_longer_declares() {
     assert_eq!(run["result"], "succeeded", "{run}");
     assert_eq!(run["applied"][0]["op"], "delete");
     assert!(store_file(&f, "entry").get("retries").is_none());
+}
+
+// A kind that cannot be listed this run may still have objects: the kinds it
+// depends on must not be deleted from under them.
+#[tokio::test]
+async fn a_kind_that_cannot_be_listed_keeps_what_it_depends_on() {
+    let f = fixture(true);
+    let (_, run) = call(
+        &f.app,
+        "POST",
+        "/api/v1/applications/app-demo/sync",
+        "admin-secret",
+    )
+    .await;
+    assert_eq!(run["result"], "succeeded", "{run}");
+
+    // git removes the namespace and its entries, while listing entries fails.
+    write(
+        &f.desired.join("namespaces.yaml"),
+        "kind: namespace\nitems: []\n",
+    );
+    write(&f.desired.join("entries.yaml"), "kind: entry\nitems: []\n");
+    std::fs::write(f.store.join("entry.json"), "{not json").unwrap();
+
+    let (_, run) = call(
+        &f.app,
+        "POST",
+        "/api/v1/applications/app-demo/sync",
+        "admin-secret",
+    )
+    .await;
+    assert_ne!(run["result"], "succeeded", "{run}");
+    let applied = run["applied"].as_array().unwrap();
+    assert_eq!(applied.len(), 1, "{run}");
+    assert_eq!(applied[0]["kind"], "namespace");
+    assert_eq!(applied[0]["ok"], false);
+    assert!(
+        applied[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("'entry' could not be listed"),
+        "{run}"
+    );
+    assert!(
+        store_file(&f, "namespace").get("team-a").is_some(),
+        "the namespace must stay while its entries are unknown"
+    );
+}
+
+// A client that goes away mid-sync (a proxy timeout, Ctrl-C) must not cut the
+// run short: it finishes, and its history entry is recorded.
+#[tokio::test]
+async fn a_sync_finishes_when_the_client_goes_away() {
+    let f = fixture_with(false, "tests/connectors/slow_kv.py");
+    let request = call(
+        &f.app,
+        "POST",
+        "/api/v1/applications/app-demo/sync",
+        "admin-secret",
+    );
+    // Each apply takes a second: the request is dropped while it writes.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), request)
+            .await
+            .is_err(),
+        "the sync should still be running"
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let detail = loop {
+        let (_, detail) = call(
+            &f.app,
+            "GET",
+            "/api/v1/applications/app-demo",
+            "admin-secret",
+        )
+        .await;
+        if !detail["history"].as_array().unwrap().is_empty() {
+            break detail;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the sync never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    assert_eq!(detail["history"][0]["result"], "succeeded", "{detail}");
+    assert_eq!(detail["history"][0]["applied"].as_array().unwrap().len(), 3);
+    assert_eq!(store_file(&f, "entry")["timeout"]["value"], "0030");
 }
 
 #[tokio::test]

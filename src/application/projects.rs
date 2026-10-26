@@ -1,4 +1,8 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+
+use dashmap::DashMap;
+use tokio::sync::RwLock;
 
 use crate::domain::project::GitProject;
 use crate::domain::sync_health::SyncHealthRegistry;
@@ -18,6 +22,32 @@ use crate::ports::venv::{VenvOutcome, VenvPort};
 // nothing an operator could query or alert on. A broken requirements.txt is
 // the same kind of invisible without this: the scripts would fail at import
 // time, one confusing sync error per source, with the actual cause nowhere.
+// One lock per checkout directory. Several things write to the same
+// checkout: every application on the project pulls it before its run, the
+// project's own task pulls it, a reload clones what is missing, a rollback
+// fetches history into it. Unserialised, two `fetch` + `reset --hard` collide
+// (`index.lock`, "shallow file changed"), a project is cloned twice, and a
+// run reading its desired state while another pull rewrites the files can
+// read a torn tree: a file briefly missing is, with prune, a delete of every
+// object it declares.
+//
+// Writers (pulls, history fetches) take it exclusively; a run takes it
+// shared, only while it reads the commit and its desired state, so a pull
+// waits for those reads and never for a whole apply.
+//
+// Keyed by the directory rather than the project id, and process-wide
+// (OnceLock: initialised on first use, then shared), because the directory is
+// what is shared: boot clones run before AppState exists, and every caller
+// already has the path.
+pub fn checkout_lock(dir: &Path) -> Arc<RwLock<()>> {
+    static LOCKS: OnceLock<DashMap<PathBuf, Arc<RwLock<()>>>> = OnceLock::new();
+    LOCKS
+        .get_or_init(DashMap::new)
+        .entry(dir.to_path_buf())
+        .or_default()
+        .clone()
+}
+
 pub async fn sync_project(
     git: &dyn GitPort,
     secrets: &dyn SecretsPort,
@@ -54,6 +84,10 @@ async fn run(
     };
 
     let dir = projects_dir.join(project_id);
+    // Held through the venv step too: it reads the checkout's
+    // requirements.txt.
+    let lock = checkout_lock(&dir);
+    let _writing = lock.write().await;
     // Bounded like every connector/enricher/output run: a git remote that
     // never answers used to hang this future — and with it whatever awaited
     // the sync. Dropping the future on timeout kills the git child
@@ -278,6 +312,81 @@ mod tests {
                 .as_deref()
                 .is_some_and(|e| e.contains("cred-ghost"))
         );
+    }
+
+    // A GitPort that takes a while and counts how many of its calls run at
+    // once, to show that pulls of one checkout never overlap.
+    #[derive(Default)]
+    struct SlowGit {
+        running: std::sync::atomic::AtomicUsize,
+        most: std::sync::atomic::AtomicUsize,
+    }
+
+    impl GitPort for SlowGit {
+        fn ensure(
+            &self,
+            _dir: &Path,
+            _project: &GitProject,
+            _credentials: &HashMap<String, String>,
+        ) -> GitFuture<'_> {
+            use std::sync::atomic::Ordering::SeqCst;
+            Box::pin(async move {
+                let now = self.running.fetch_add(1, SeqCst) + 1;
+                self.most.fetch_max(now, SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                self.running.fetch_sub(1, SeqCst);
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn pulls_of_one_checkout_never_overlap() {
+        let secrets = MockSecrets::new();
+        let health = SyncHealthRegistry::new();
+        let git = SlowGit::default();
+        let venv = StubVenv::default();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project();
+
+        // Five applications on one project, pulling at once.
+        let pulls = (0..5).map(|_| {
+            sync_project(
+                &git,
+                &secrets,
+                &venv,
+                &health,
+                "prj-shared",
+                &project,
+                dir.path(),
+            )
+        });
+        for result in futures::future::join_all(pulls).await {
+            result.expect("the stub succeeds");
+        }
+        assert_eq!(git.most.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // A reader holding the lock keeps a pull out until it is done.
+        let lock = checkout_lock(&dir.path().join("prj-shared"));
+        let reading = lock.read().await;
+        let pull = sync_project(
+            &git,
+            &secrets,
+            &venv,
+            &health,
+            "prj-shared",
+            &project,
+            dir.path(),
+        );
+        tokio::pin!(pull);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut pull)
+                .await
+                .is_err(),
+            "a pull must wait for a run reading the checkout"
+        );
+        drop(reading);
+        pull.await.expect("the pull goes on once the read is over");
     }
 
     #[tokio::test]

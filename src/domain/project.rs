@@ -83,3 +83,52 @@ pub fn without_userinfo(url: &str) -> String {
         None => url.to_string(),
     }
 }
+
+// Every address in a piece of text, without its userinfo: what a git error
+// (its command line, and git's own stderr, which quotes the remote) becomes
+// before it reaches a log, sync_health.last_error or the API.
+pub fn redact_userinfo(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("://") {
+        let (before, after) = rest.split_at(at + 3);
+        out.push_str(before);
+        // The authority ends where the path, the line or the quoting does.
+        let end = after
+            .find(|c: char| c == '/' || c.is_whitespace() || matches!(c, '\'' | '"' | '`'))
+            .unwrap_or(after.len());
+        let authority = &after[..end];
+        match authority.rfind('@') {
+            Some(i) => out.push_str(&authority[i + 1..]),
+            None => out.push_str(authority),
+        }
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn userinfo_is_removed_from_every_address_in_a_text() {
+        let text = "git clone https://bot:s3cr3t@git.example.com/x.git /p failed: \
+                    fatal: unable to access 'https://bot:s3cr3t@git.example.com/x.git/': refused";
+        let clean = redact_userinfo(text);
+        assert!(!clean.contains("s3cr3t"), "{clean}");
+        assert!(
+            clean.contains("https://git.example.com/x.git /p"),
+            "{clean}"
+        );
+        assert!(
+            clean.contains("'https://git.example.com/x.git/'"),
+            "{clean}"
+        );
+        // Nothing to remove: unchanged.
+        let plain = "fetch origin main from https://git.example.com/x.git";
+        assert_eq!(redact_userinfo(plain), plain);
+        assert_eq!(redact_userinfo("token@x no scheme"), "token@x no scheme");
+    }
+}

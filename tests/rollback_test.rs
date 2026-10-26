@@ -248,3 +248,134 @@ async fn rollback_applies_an_older_commit_and_pauses_until_the_next_sync() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
+
+// Desired state at the repository's root (`path: ""`), committed as is.
+fn commit_root(remote: &Path, namespace: &str, retries: u32) -> String {
+    std::fs::write(
+        remote.join("entries.yaml"),
+        format!(
+            "kind: entry\nitems:\n  - name: retries\n    namespace: {namespace}\n    value: {retries}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        remote.join("namespaces.yaml"),
+        "kind: namespace\nitems:\n  - name: team-a\n",
+    )
+    .unwrap();
+    git(remote, &["add", "-A"]);
+    git(
+        remote,
+        &["commit", "-qm", &format!("{namespace} {retries}")],
+    );
+    git(remote, &["rev-parse", "HEAD"])
+}
+
+#[tokio::test]
+async fn failed_rollbacks_do_not_pause_and_checks_never_apply_over_one() {
+    use unified_gitops::application::reconcile::pull_and_reconcile;
+    use unified_gitops::domain::run::{RunMode, Trigger};
+
+    let remote = tempfile::tempdir().unwrap();
+    let projects = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    git(remote.path(), &["init", "-q", "-b", "main"]);
+    let old = commit_root(remote.path(), "team-a", 3);
+    // Every operation of this one fails: its namespace does not exist.
+    let broken = commit_root(remote.path(), "team-z", 4);
+    let new = commit_root(remote.path(), "team-a", 5);
+
+    let connector: unified_gitops::domain::connector::Connector = serde_saphyr::from_str(&format!(
+        "path: {}/connectors/kv.py\n",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    // `path: ""`: the repository's root, which a rollback must export too.
+    let app_def: unified_gitops::domain::app::Application = serde_saphyr::from_str(&format!(
+        "connector: kv\nconfig:\n  dir: {}\nproject: prj\npath: \"\"\nauto_sync: true\n",
+        store.path().display()
+    ))
+    .unwrap();
+    let project: unified_gitops::domain::project::GitProject =
+        serde_saphyr::from_str(&format!("git_url: file://{}\n", remote.path().display())).unwrap();
+    let (app, state) = unified_gitops::AppBuilder::new()
+        .applications(HashMap::from([("demo".to_string(), app_def)]))
+        .connectors(HashMap::from([("kv".to_string(), connector)]))
+        .projects(
+            HashMap::from([("prj".to_string(), project)]),
+            projects.path().to_path_buf(),
+        )
+        .state_dir(state_dir.path().to_path_buf())
+        .api_key(Some("admin".into()))
+        .api_keys(vec![ResolvedApiKey {
+            name: "admin".into(),
+            secret: "admin".into(),
+            permissions: Permissions::Admin,
+        }])
+        .build_with_state();
+    let retries = || -> Value {
+        let text = std::fs::read_to_string(store.path().join("entry.json")).unwrap();
+        serde_json::from_str::<Value>(&text).unwrap()["retries"]["value"].clone()
+    };
+
+    let (_, run) = call(
+        &app,
+        "POST",
+        "/api/v1/applications/demo/sync",
+        "admin",
+        None,
+    )
+    .await;
+    assert_eq!(run["result"], "succeeded", "{run}");
+    assert_eq!(run["revision"], new.as_str());
+
+    // A rollback that changed nothing (every operation failed) is no reason
+    // to pause the checks.
+    let (status, run) = call(
+        &app,
+        "POST",
+        "/api/v1/applications/demo/rollback",
+        "admin",
+        Some(json!({"revision": broken})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    assert_eq!(run["result"], "failed", "{run}");
+    assert_eq!(retries(), json!(5));
+    let (_, detail) = call(&app, "GET", "/api/v1/applications/demo", "admin", None).await;
+    assert!(detail.get("rollback").is_none(), "{detail}");
+
+    // An application at the repository's root rolls back like any other.
+    let (status, run) = call(
+        &app,
+        "POST",
+        "/api/v1/applications/demo/rollback",
+        "admin",
+        Some(json!({"revision": old})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    assert_eq!(run["result"], "succeeded", "{run}");
+    assert_eq!(retries(), json!(3));
+
+    // A scheduled check with auto_sync asks to apply; the run itself, under
+    // the application's lock, sees the rollback and only compares.
+    let config = state.config();
+    let record = pull_and_reconcile(
+        &state.reconciler(),
+        &config.catalog(),
+        "demo",
+        RunMode::Apply,
+        Trigger::Schedule,
+    )
+    .await
+    .unwrap();
+    assert_eq!(record.mode, RunMode::Plan);
+    assert!(record.applied.is_empty());
+    assert_eq!(
+        retries(),
+        json!(3),
+        "HEAD must not be applied over the rollback"
+    );
+}

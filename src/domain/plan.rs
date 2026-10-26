@@ -167,6 +167,10 @@ fn compare(
         match (wanted, have.get(field)) {
             (Value::Object(w), Some(Value::Object(h))) => compare(&path, w, h, key, changes),
             (w, Some(h)) if same(w, h) => {}
+            // `field:` or `field: null` in git, and a system that leaves empty
+            // fields out of its listing: both say "nothing there". Reported,
+            // it would be an update from null to null, applied forever.
+            (Value::Null, None) => {}
             (w, h) => changes.push(Change {
                 field: path,
                 from: h.cloned().unwrap_or(Value::Null),
@@ -180,7 +184,7 @@ fn compare(
 // side YAML, the other an API's float) are the same number.
 fn same(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
+        (Value::Number(x), Value::Number(y)) => same_number(x, y),
         (Value::Array(x), Value::Array(y)) => {
             x.len() == y.len() && x.iter().zip(y).all(|(a, b)| same(a, b))
         }
@@ -188,6 +192,24 @@ fn same(a: &Value, b: &Value) -> bool {
             x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same(v, w)))
         }
         _ => a == b,
+    }
+}
+
+// By value, without going through f64 when it would round: two integers
+// above 2^53 that differ (an id, a byte count) are both the same f64, and a
+// real change would be missed. An integer and a float are equal only when the
+// float is that exact whole number.
+fn same_number(x: &serde_json::Number, y: &serde_json::Number) -> bool {
+    let int = |n: &serde_json::Number| {
+        n.as_i64()
+            .map(i128::from)
+            .or_else(|| n.as_u64().map(i128::from))
+    };
+    let whole = |f: f64| (f.fract() == 0.0 && f.abs() < 1e38).then_some(f as i128);
+    match (int(x), int(y), x.as_f64(), y.as_f64()) {
+        (Some(a), Some(b), _, _) => a == b,
+        (Some(a), None, _, Some(f)) | (None, Some(a), Some(f), _) => whole(f) == Some(a),
+        (_, _, a, b) => a == b,
     }
 }
 
@@ -241,6 +263,51 @@ mod tests {
         let d = diff("k", "name", &[], &[json!({"name": "x"})], true);
         assert_eq!(d.operations[0].op, OpKind::Delete);
         assert!(d.unmanaged.is_empty());
+    }
+
+    #[test]
+    fn a_declared_null_matches_a_field_the_system_leaves_out() {
+        let desired = [obj(json!({"name": "a", "description": null}))];
+        let d = diff("k", "name", &desired, &[json!({"name": "a"})], false);
+        assert!(d.operations.is_empty(), "{:?}", d.operations);
+        assert_eq!(d.in_sync, 1);
+        // A value the system does have is still a change to null.
+        let d = diff(
+            "k",
+            "name",
+            &desired,
+            &[json!({"name": "a", "description": "x"})],
+            false,
+        );
+        assert_eq!(d.operations.len(), 1);
+    }
+
+    #[test]
+    fn numbers_compare_exactly() {
+        let big = 9_007_199_254_740_993u64; // 2^53 + 1: rounds to 2^53 as f64
+        let desired = [obj(json!({"name": "a", "size": big}))];
+        let d = diff(
+            "k",
+            "name",
+            &desired,
+            &[json!({"name": "a", "size": big - 1})],
+            false,
+        );
+        assert_eq!(d.operations.len(), 1, "a change past 2^53 must be seen");
+        let d = diff(
+            "k",
+            "name",
+            &desired,
+            &[json!({"name": "a", "size": big})],
+            false,
+        );
+        assert!(d.operations.is_empty());
+        // An integer and the float of the same whole number are equal; a
+        // fraction is not.
+        assert!(same(&json!(10), &json!(10.0)));
+        assert!(same(&json!(-3.0), &json!(-3)));
+        assert!(!same(&json!(10), &json!(10.5)));
+        assert!(same(&json!(0.5), &json!(0.5)));
     }
 
     #[test]

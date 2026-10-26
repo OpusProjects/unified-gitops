@@ -16,7 +16,8 @@ use crate::ports::connector::{ConnectorCall, ConnectorError, ConnectorFuture, Co
 // - UNIFIED_ALLOW_WRITE=1 only on `apply`. A shared script that reads for
 //   unified-api and writes for gitops refuses to write without it — and
 //   unified-api, whose environment is scrubbed too, never sets it.
-// - The timeout KILLS the script (kill_on_drop), it does not abandon it.
+// - The timeout KILLS the script (kill_on_drop), it does not abandon it, and
+//   with it every process it started (its own process group, see GroupKill).
 pub struct ProcessConnector;
 
 impl Default for ProcessConnector {
@@ -51,6 +52,10 @@ async fn run(
         process_env::apply_venv(&mut cmd, venv_bin);
     }
     cmd.kill_on_drop(true);
+    // Its own process group (pgid = its pid), so a timeout can kill
+    // everything it started along with it.
+    #[cfg(unix)]
+    cmd.process_group(0);
     cmd.args(args);
     cmd.env("APPLICATION_CONFIG", config);
     if write {
@@ -73,6 +78,7 @@ async fn run(
             message: format!("could not run {what}: {e}"),
             stderr: String::new(),
         })?;
+        let group = GroupKill(child.id());
         if let Some(input) = stdin
             && let Some(mut pipe) = child.stdin.take()
         {
@@ -82,10 +88,12 @@ async fn run(
             let _ = pipe.write_all(&input).await;
             drop(pipe);
         }
-        child.wait_with_output().await.map_err(|e| ConnectorError {
+        let output = child.wait_with_output().await.map_err(|e| ConnectorError {
             message: format!("{what} could not be waited on: {e}"),
             stderr: String::new(),
-        })
+        });
+        group.disarm();
+        output
     };
 
     let output = tokio::time::timeout(Duration::from_secs(call.timeout_seconds), fut)
@@ -114,6 +122,34 @@ async fn run(
         });
     }
     Ok(output.stdout)
+}
+
+// Kills a script's whole process group when dropped before the script was
+// waited for: what a timeout does (the future is dropped). kill_on_drop
+// alone sends SIGKILL to one pid, so a wrapper (`#!/bin/sh` running
+// `python3 real.py` without exec) died while the real script went on writing
+// after its run was reported failed, into the next run's apply. Disarmed once
+// the script has been waited for: by then its group may be gone and its id
+// reused.
+struct GroupKill(Option<u32>);
+
+impl GroupKill {
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.0.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+            // SAFETY: killpg only sends a signal; the group is the one
+            // process_group(0) created for this script, still unwaited for.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
+    }
 }
 
 fn parse<T: serde::de::DeserializeOwned>(bytes: &[u8], what: &str) -> Result<T, ConnectorError> {
@@ -213,5 +249,41 @@ mod tests {
             .unwrap_err();
         assert!(err.message.contains("killed"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    // A wrapper that does not exec its real script: the timeout must kill
+    // the child it started too, not only the wrapper.
+    #[tokio::test]
+    async fn a_timeout_kills_what_the_connector_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("child.pid");
+        let mut c = call("tests/connectors/hang_wrapper.py", 1);
+        c.config.insert(
+            "pidfile".into(),
+            Value::String(pidfile.display().to_string()),
+        );
+        let err = ProcessConnector::new().list(&c, "x").await.unwrap_err();
+        assert!(err.message.contains("killed"), "{err}");
+
+        let pid = std::fs::read_to_string(&pidfile).unwrap();
+        let alive = |pid: &str| {
+            // Gone, or a zombie waiting for init to reap it: not running.
+            std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())).is_ok_and(|stat| {
+                !stat
+                    .rsplit(')')
+                    .next()
+                    .unwrap_or("")
+                    .trim_start()
+                    .starts_with('Z')
+            })
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while alive(&pid) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            !alive(&pid),
+            "the connector's child {pid} outlived the timeout"
+        );
     }
 }

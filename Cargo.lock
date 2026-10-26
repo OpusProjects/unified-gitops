@@ -2426,6 +2426,7 @@ dependencies = [
  "getrandom 0.4.3",
  "http-body-util",
  "ldap3",
+ "libc",
  "metrics",
  "metrics-exporter-prometheus",
  "reqwest",

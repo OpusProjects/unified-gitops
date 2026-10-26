@@ -64,6 +64,16 @@ fn default_interval_seconds() -> u64 {
 }
 
 impl Application {
+    // The folder as a path inside the checkout, never empty: `path: ""` means
+    // the repository's root like ".", but an empty pathspec is refused by
+    // `git archive`, which made a rollback of such an application fail.
+    pub fn folder(&self) -> &str {
+        match self.path.trim_end_matches('/') {
+            "" => ".",
+            folder => folder,
+        }
+    }
+
     pub fn errors(&self, id: &str) -> Vec<String> {
         let mut errors = Vec::new();
         if self.sync_interval_seconds == 0 {

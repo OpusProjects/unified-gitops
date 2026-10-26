@@ -55,6 +55,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 utoipa = { version = "6", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "10", features = ["axum"] }
 croner = "4.0.0"
+# killpg: a connector's timeout kills its whole process group, not only the
+# script (a wrapper's children would outlive it). Already in the tree through
+# tokio.
+libc = "0.2"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 
 # [dev-dependencies] = compiled only for tests, never shipped in the production binary

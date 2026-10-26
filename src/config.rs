@@ -491,6 +491,15 @@ impl AppConfig {
 
         // A cron schedule must parse, and a project cannot have two cadences.
         for (id, project) in &self.projects {
+            // The id names the checkout's folder (and its venv's): `../x` or
+            // an absolute name would clone and `reset --hard` outside
+            // projects.dir.
+            if !is_safe_id(id) {
+                errors.push(format!(
+                    "Project '{id}' must use only letters, digits, '-', '_' and '.' \
+                     (it names a folder in projects.dir)"
+                ));
+            }
             if let Some(expression) = &project.schedule {
                 if let Err(e) = crate::adapters::r#in::scheduler::parse_cron(expression) {
                     errors.push(format!(
@@ -1022,6 +1031,23 @@ mod tests {
         ]);
         let err = load_err(&dir);
         assert!(err.contains("Application '.hidden'"), "{err}");
+    }
+
+    // A project's name is its checkout's folder: `../x` or an absolute name
+    // would clone (and reset --hard) outside projects.dir.
+    #[test]
+    fn project_names_that_would_escape_projects_dir_are_refused() {
+        for name in ["../outside", "/srv/other", ".venvs", "a/b"] {
+            let body = format!(
+                "projects:\n  - name: \"{name}\"\n    git_url: https://example.com/x.git\n"
+            );
+            let dir = dir_with(&[("prj.yaml", body.as_str())]);
+            let err = load_err(&dir);
+            assert!(
+                err.contains(&format!("Project '{name}' must use only")),
+                "{err}"
+            );
+        }
     }
 
     // `type` is optional, `script` by default; anything else is refused by name.

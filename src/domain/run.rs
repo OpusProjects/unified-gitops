@@ -121,6 +121,21 @@ pub struct RunRecord {
     pub errors: Vec<String>,
 }
 
+impl RunRecord {
+    // Holds the record to the same bounds as `operations`: `applied` to
+    // RECORDED_OPERATIONS, `errors` to RECORDED_ERRORS plus one line saying
+    // how many were left out. Done once the result is decided, so the result
+    // still reflects every operation.
+    pub fn bound(&mut self) {
+        self.applied.truncate(RECORDED_OPERATIONS);
+        if self.errors.len() > RECORDED_ERRORS {
+            let more = self.errors.len() - RECORDED_ERRORS;
+            self.errors.truncate(RECORDED_ERRORS);
+            self.errors.push(format!("… and {more} more errors"));
+        }
+    }
+}
+
 // The last comparison, kept whole so the API can show the pending diff.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct PlanSnapshot {
@@ -150,6 +165,11 @@ const HISTORY: usize = 50;
 // How many operations one run keeps: enough to read any ordinary change, and
 // a bound on what a run that found thousands holds in memory, times HISTORY.
 pub const RECORDED_OPERATIONS: usize = 200;
+
+// How many error lines one run keeps. Each can carry a script's stderr (up to
+// 2 KB), and an apply that fails on every one of ten thousand operations
+// would otherwise keep ten thousand of them, times HISTORY.
+pub const RECORDED_ERRORS: usize = 50;
 
 #[derive(Default)]
 struct Entry {
@@ -230,4 +250,41 @@ pub fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_record_keeps_bounded_applied_operations_and_errors() {
+        let mut record = RunRecord {
+            id: 1,
+            trigger: Trigger::Manual,
+            mode: RunMode::Apply,
+            result: RunResult::Failed,
+            started_at: 0,
+            finished_at: 0,
+            revision: None,
+            planned: 10_000,
+            operations: Vec::new(),
+            applied: (0..10_000)
+                .map(|i| AppliedOperation {
+                    kind: "k".into(),
+                    key: i.to_string(),
+                    op: OpKind::Create,
+                    ok: false,
+                    error: Some("x".repeat(2000)),
+                })
+                .collect(),
+            errors: (0..10_000)
+                .map(|i| format!("create k '{i}': failed"))
+                .collect(),
+        };
+        record.bound();
+        assert_eq!(record.applied.len(), RECORDED_OPERATIONS);
+        assert_eq!(record.errors.len(), RECORDED_ERRORS + 1);
+        assert_eq!(record.errors.last().unwrap(), "… and 9950 more errors");
+        assert_eq!(record.planned, 10_000, "the count stays whole");
+    }
 }

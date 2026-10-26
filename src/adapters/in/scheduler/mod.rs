@@ -151,16 +151,6 @@ where
     })
 }
 
-// auto_sync applies what a check finds; otherwise the check only reports. A
-// rollback pauses it: applying HEAD would undo the rollback.
-fn scheduled_mode(auto_sync: bool, rolled_back: bool) -> RunMode {
-    if auto_sync && !rolled_back {
-        RunMode::Apply
-    } else {
-        RunMode::Plan
-    }
-}
-
 // One scheduled check of an application, with the backoff bookkeeping. The
 // project is pulled first (inside pull_and_reconcile), so a commit is picked up
 // at the next check, not at the project's own pull interval.
@@ -175,7 +165,16 @@ async fn scheduled_reconcile(
         return;
     };
 
-    let mode = scheduled_mode(app.auto_sync, state.store.rollback(app_id).is_some());
+    // auto_sync applies what a check finds; otherwise the check only reports.
+    // Whether a rollback pauses it is the run's to decide, under the
+    // application's lock (reconcile::effective_mode): read here, before the
+    // pull and the wait for that lock, it could be stale by the time the run
+    // starts.
+    let mode = if app.auto_sync {
+        RunMode::Apply
+    } else {
+        RunMode::Plan
+    };
     let failed = match pull_and_reconcile(
         &state.reconciler(),
         &config.catalog(),
@@ -591,13 +590,6 @@ mod tests {
         assert!(parse_cron("*/5 * * * *").is_ok());
         assert!(parse_cron("0 */5 * * * *").is_ok());
         assert!(parse_cron("not a cron").is_err());
-    }
-
-    #[test]
-    fn a_rollback_pauses_auto_sync() {
-        assert_eq!(scheduled_mode(true, false), RunMode::Apply);
-        assert_eq!(scheduled_mode(true, true), RunMode::Plan);
-        assert_eq!(scheduled_mode(false, false), RunMode::Plan);
     }
 
     #[test]

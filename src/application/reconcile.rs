@@ -111,9 +111,27 @@ pub async fn reconcile(
         .ok_or_else(|| format!("application '{app_id}' is not configured"))?;
     let app_lock = r.locks.get(app_id.to_string());
     let _running = app_lock.lock().await;
+    let mode = effective_mode(mode, trigger, r.store.rollback(app_id).is_some());
     let checkout = r.projects_dir.join(&app.project);
+    // Shared with other readers, exclusive of pulls: the commit recorded and
+    // the files read must be the same tree (see projects::checkout_lock).
+    // Released as soon as the desired state is read.
+    let reading = crate::application::projects::checkout_lock(&checkout)
+        .read_owned()
+        .await;
     let revision = r.git.revision(&checkout).await;
-    let record = reconcile_tree(r, catalog, app_id, app, &checkout, revision, mode, trigger).await;
+    let record = reconcile_tree(
+        r,
+        catalog,
+        app_id,
+        app,
+        &checkout,
+        Some(reading),
+        revision,
+        mode,
+        trigger,
+    )
+    .await;
     // A Sync someone asked for applies HEAD again: whatever a rollback had
     // put back is replaced, so the rollback (and its pause) is over.
     if mode == RunMode::Apply
@@ -125,6 +143,19 @@ pub async fn reconcile(
         tracing::warn!(application = %app_id, error = %e, "could not clear the rollback");
     }
     Ok(record)
+}
+
+// A scheduled apply never runs over a rollback: git still says HEAD, and
+// applying it would undo what the rollback put back. Decided by the run, under
+// the application's lock: a check that looked for the rollback before waiting
+// for the lock (held by that very rollback) used to find none, wait, and apply
+// HEAD right after it.
+fn effective_mode(mode: RunMode, trigger: Trigger, rolled_back: bool) -> RunMode {
+    if mode == RunMode::Apply && trigger == Trigger::Schedule && rolled_back {
+        RunMode::Plan
+    } else {
+        mode
+    }
 }
 
 // Applies the desired state of an older commit, once: the checkout is left
@@ -152,14 +183,17 @@ pub async fn rollback(
         app_id,
         app,
         &tree,
+        None,
         Some(sha.clone()),
         RunMode::Apply,
         Trigger::Rollback,
     )
     .await;
     // Anything applied means the system now holds (some of) the older
-    // state: pause, or the next check would put HEAD straight back.
-    if record.result != RunResult::Failed || !record.applied.is_empty() {
+    // state: pause, or the next check would put HEAD straight back. A run
+    // whose every operation failed changed nothing, and pausing would only
+    // stop the checks for no reason.
+    if record.result != RunResult::Failed || record.applied.iter().any(|a| a.ok) {
         let mark = crate::domain::run::Rollback {
             revision: sha,
             at: now(),
@@ -210,12 +244,22 @@ async fn export_tree(
             .map_err(|e| format!("credential '{id}': {}", e.message))?,
         None => Default::default(),
     };
+    // Exclusive: an older commit may first be fetched into the checkout,
+    // which must not run alongside a pull of it.
+    let lock = crate::application::projects::checkout_lock(&checkout);
+    let _fetching = lock.write().await;
     // Bounded like a pull: fetching history from a remote that never
     // answers must not hold the application's lock forever.
     let sha = tokio::time::timeout(
         std::time::Duration::from_secs(project.timeout_seconds),
-        r.git
-            .export(&checkout, project, &credentials, revision, &app.path, &tree),
+        r.git.export(
+            &checkout,
+            project,
+            &credentials,
+            revision,
+            app.folder(),
+            &tree,
+        ),
     )
     .await
     .map_err(|_| {
@@ -264,6 +308,7 @@ pub async fn preview_rollback(
         app_id,
         app,
         &tree.0,
+        None,
         RunMode::Plan,
         &mut scratch,
     )
@@ -282,6 +327,7 @@ async fn reconcile_tree(
     app_id: &str,
     app: &Application,
     checkout: &Path,
+    reading: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
     revision: Option<String>,
     mode: RunMode,
     trigger: Trigger,
@@ -301,7 +347,17 @@ async fn reconcile_tree(
         errors: Vec::new(),
     };
 
-    let outcome = run(r, catalog, app_id, app, checkout, mode, &mut record).await;
+    let outcome = run(
+        r,
+        catalog,
+        app_id,
+        app,
+        checkout,
+        reading,
+        mode,
+        &mut record,
+    )
+    .await;
     record.finished_at = now();
 
     let (status, snapshot) = match outcome {
@@ -319,6 +375,8 @@ async fn reconcile_tree(
         s.revision = revision.clone();
         s
     });
+    // The result is decided; what is kept of it is bounded.
+    record.bound();
 
     match record.result {
         RunResult::Failed | RunResult::Partial => {
@@ -349,12 +407,16 @@ fn status_of(record: &RunRecord, snapshot: &PlanSnapshot) -> SyncStatus {
     }
 }
 
+// `reading` is the checkout's shared lock when the tree is a checkout pulls
+// can rewrite; it is released once the desired state is read.
+#[allow(clippy::too_many_arguments)]
 async fn run(
     r: &Reconciler<'_>,
     catalog: &Catalog<'_>,
     app_id: &str,
     app: &Application,
     checkout: &Path,
+    reading: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
     mode: RunMode,
     record: &mut RunRecord,
 ) -> Result<PlanSnapshot, Vec<String>> {
@@ -376,7 +438,8 @@ async fn run(
 
     // Desired state is read first: a file that does not parse fails the run
     // before any script is started.
-    let docs = desired::load_dir(&checkout.join(&app.path))?;
+    let docs = desired::load_folder(checkout, &app.path)?;
+    drop(reading);
 
     // Credentials are resolved once per run, and the connector must speak this
     // protocol and say what it manages before it is asked for anything.
@@ -391,7 +454,7 @@ async fn run(
     // system.
     let set = desired::validate(&app.connector, &described, &docs)?;
     // Paths from the repository's root, as a reader finds them in git.
-    let folder = app.path.trim_end_matches('/');
+    let folder = app.folder();
     let files: HashMap<(String, String), String> = desired::declared_in(&described, &docs)
         .into_iter()
         .map(|(id, file)| (id, format!("{folder}/{file}")))
@@ -406,12 +469,15 @@ async fn run(
     let mut unmanaged: Vec<Operation> = Vec::new();
     let mut in_sync = 0usize;
     let mut errors: Vec<String> = Vec::new();
+    // Kinds whose objects are unknown this run: listing them failed.
+    let mut unlisted: Vec<&str> = Vec::new();
 
     for kind in &kinds {
         let actual = match refresh(r, &call, app_id, &app.connector, kind).await {
             Ok(a) => a,
             Err(e) => {
                 errors.push(format!("{kind}: {e}"));
+                unlisted.push(kind);
                 continue;
             }
         };
@@ -459,12 +525,48 @@ async fn run(
         .into_iter()
         .chain(deletes.into_iter().rev())
         .collect();
+    // Kinds with a delete that failed: their objects may still be there.
+    let mut undeleted: Vec<&str> = Vec::new();
     for op in &ordered {
+        // Dependencies hold both ways, and a kind whose state is unknown
+        // breaks them. Its dependencies are not deleted (a namespace must not
+        // go while entries the run could not list, or failed to delete, may
+        // still be in it), and its dependents are not written (they would be
+        // created against objects the run knows nothing about). Skipped, not
+        // applied: the next run lists again and picks up from there.
+        let blocked_by = if op.op == OpKind::Delete {
+            unlisted
+                .iter()
+                .chain(&undeleted)
+                .find(|k| described.depends_on(k, &op.kind))
+        } else {
+            unlisted.iter().find(|k| described.depends_on(&op.kind, k))
+        };
+        if let Some(blocker) = blocked_by {
+            record.applied.push(AppliedOperation {
+                kind: op.kind.clone(),
+                key: op.key.clone(),
+                op: op.op,
+                ok: false,
+                error: Some(format!(
+                    "not applied: kind '{blocker}' could not be {}",
+                    if unlisted.contains(blocker) {
+                        "listed"
+                    } else {
+                        "fully deleted"
+                    }
+                )),
+            });
+            continue;
+        }
         let payload = json!({"op": op.op.as_str(), "object": op.object});
         let started = std::time::Instant::now();
         let result = r.connector.apply(&call, &op.kind, &payload).await;
         count_call(app_id, &app.connector, "apply", result.is_ok(), started);
         let ok = result.is_ok();
+        if !ok && op.op == OpKind::Delete && !undeleted.contains(&op.kind.as_str()) {
+            undeleted.push(&op.kind);
+        }
         record.applied.push(AppliedOperation {
             kind: op.kind.clone(),
             key: op.key.clone(),
@@ -634,4 +736,19 @@ fn count_call(
         "command" => command
     )
     .record(started.elapsed().as_secs_f64());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rollback_pauses_scheduled_applies_only() {
+        use RunMode::{Apply, Plan};
+        assert_eq!(effective_mode(Apply, Trigger::Schedule, false), Apply);
+        assert_eq!(effective_mode(Apply, Trigger::Schedule, true), Plan);
+        assert_eq!(effective_mode(Plan, Trigger::Schedule, false), Plan);
+        // A manual Sync is what ends a rollback: it still applies.
+        assert_eq!(effective_mode(Apply, Trigger::Manual, true), Apply);
+    }
 }

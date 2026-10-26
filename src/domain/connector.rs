@@ -178,6 +178,28 @@ impl Kinds {
         self.0.keys()
     }
 
+    // Whether `kind` depends on `other`, directly or through other kinds
+    // (an export on a quota on a zone depends on the zone).
+    pub fn depends_on(&self, kind: &str, other: &str) -> bool {
+        let mut seen: Vec<&str> = Vec::new();
+        let mut todo: Vec<&str> = vec![kind];
+        while let Some(next) = todo.pop() {
+            let Some(decl) = self.0.get(next) else {
+                continue;
+            };
+            for dep in &decl.depends_on {
+                if dep == other {
+                    return true;
+                }
+                if !seen.contains(&dep.as_str()) {
+                    seen.push(dep);
+                    todo.push(dep);
+                }
+            }
+        }
+        false
+    }
+
     // Kinds in an order that respects depends_on: dependencies first.
     // Validation has already refused unknown names and cycles, so a kind is
     // placed once all of its dependencies are.
@@ -278,6 +300,10 @@ mod tests {
         .kinds("p")
         .unwrap();
         assert_eq!(kinds.in_order(), vec!["quota", "export", "share"]);
+        assert!(kinds.depends_on("share", "quota"), "through export");
+        assert!(kinds.depends_on("export", "quota"));
+        assert!(!kinds.depends_on("quota", "export"));
+        assert!(!kinds.depends_on("quota", "quota"));
     }
 
     #[test]
