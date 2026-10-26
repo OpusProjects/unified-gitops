@@ -8,7 +8,7 @@ GitOps for anything with an API: declare state in YAML, reconcile it through plu
 
 Unified GitOps pulls desired state from git, compares it with what each live system has, and applies
 the difference, the way Argo CD does for Kubernetes. The systems are anything a script can talk to:
-an Isilon's NFS exports, Ascender job templates, AnsibleForms forms, InfiniBox volumes.
+an Isilon's NFS exports, Ascender job templates, vCenter virtual machines, InfiniBox volumes.
 
 Changes no longer wait in a queue of CI runners: a commit is picked up at the next check, inside your
 network, and a change made by hand on a system shows up as drift.
