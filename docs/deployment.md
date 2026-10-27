@@ -23,8 +23,8 @@ docker run -p 8183:8183 \
 
 `deploy/k8s/` is a kustomization: Deployment (one replica: the locks are in-process), Service, PVC
 for `/var/lib/unified-gitops`, and the config directory from a ConfigMap. Credentials come in as env
-vars from a Secret (External Secrets from Vault works unchanged), or straight from Vault with
-`secrets.vault` and Kubernetes auth.
+vars from a Secret (External Secrets from Vault works unchanged), or straight from Vault through a
+`type: vault` credential with Kubernetes auth.
 
 Probes: `/healthz` (alive) and `/readyz` (serving; it does not depend on the systems being up, so an
 outage of a managed system never restarts this pod).

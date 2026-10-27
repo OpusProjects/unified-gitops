@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::domain::app::Application;
+use crate::domain::credential::Credential;
 use crate::domain::ldap::LdapConfig;
 use crate::domain::project::GitProject;
 use crate::ports::secrets::{SecretsError, SecretsPort};
@@ -87,9 +88,10 @@ fn merge(resolved: Vec<(&String, HashMap<String, String>)>) -> HashMap<String, S
 }
 
 // What names a credential in its configuration: the applications that pass it
-// to their connector, the projects that clone with it, and the directory
-// login's service account. Sorted, so a page and a diff of it are stable.
+// to their connector, the projects that clone with it, the directory login's
+// service account, and, for a Vault, the credentials reading from it. Sorted, so a page and a diff of it are stable.
 pub struct CredentialUsers {
+    pub credentials: Vec<String>,
     pub applications: Vec<String>,
     pub projects: Vec<String>,
     pub ldap: bool,
@@ -97,6 +99,7 @@ pub struct CredentialUsers {
 
 pub fn users_of(
     credential_id: &str,
+    credentials: &HashMap<String, Credential>,
     applications: &HashMap<String, Application>,
     projects: &HashMap<String, GitProject>,
     ldap: Option<&LdapConfig>,
@@ -113,7 +116,15 @@ pub fn users_of(
         .map(|(id, _)| id.clone())
         .collect();
     project_ids.sort();
+    // A Vault's users are the credentials reading from it (their `vault:`).
+    let mut credential_ids: Vec<String> = credentials
+        .iter()
+        .filter(|(_, c)| c.vault.as_deref() == Some(credential_id))
+        .map(|(id, _)| id.clone())
+        .collect();
+    credential_ids.sort();
     CredentialUsers {
+        credentials: credential_ids,
         applications: app_ids,
         projects: project_ids,
         ldap: ldap.is_some_and(|l| l.bind_credential == credential_id),
@@ -236,5 +247,45 @@ mod tests {
             "error was: {}",
             err.message
         );
+    }
+
+    // A Vault is used by the credentials reading from it, not unused.
+    #[test]
+    fn a_vaults_users_are_the_credentials_naming_it() {
+        let credential = |yaml: &str| -> Credential { serde_saphyr::from_str(yaml).unwrap() };
+        let credentials = HashMap::from([
+            (
+                "cred-vault".to_string(),
+                credential("type: vault\naddress: https://vault.example\nenv_vars:\n  token: T\n"),
+            ),
+            (
+                "cred-b".to_string(),
+                credential("type: token\nvault: cred-vault\nvault_path: b\n"),
+            ),
+            (
+                "cred-a".to_string(),
+                credential("type: token\nvault: cred-vault\nvault_path: a\n"),
+            ),
+            (
+                "cred-env".to_string(),
+                credential("type: token\nenv_vars:\n  token: X\n"),
+            ),
+        ]);
+        let users = users_of(
+            "cred-vault",
+            &credentials,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+        );
+        assert_eq!(users.credentials, ["cred-a", "cred-b"]);
+        let users = users_of(
+            "cred-a",
+            &credentials,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+        );
+        assert!(users.credentials.is_empty());
     }
 }

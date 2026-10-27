@@ -8,6 +8,7 @@ use crate::AppState;
 use crate::adapters::r#in::http::auth::AuthContext;
 use crate::adapters::r#in::http::error::{ApiError, ErrorBody};
 use crate::application::credentials::{check, users_of};
+use crate::domain::credential::CredentialType;
 
 // The credentials configured on this instance, for the UI's Credentials
 // page: what each one is, where its secrets come from, whether they resolve
@@ -26,13 +27,16 @@ pub struct CredentialInfo {
     /// The item's identity, as in the configuration
     pub name: String,
     pub description: Option<String>,
-    /// `username_password`, `token` or `ssh_key`
+    /// `username_password`, `token`, `ssh_key` or `vault`
     #[serde(rename = "type")]
     pub credential_type: &'static str,
     /// Where the secrets are read from: `vault`, `env`, `file`, or `files`
     /// (only file paths handed to the script)
     pub backend: &'static str,
     pub vault_path: Option<String>,
+    /// The `type: vault` credential a vault_path is read from (absent = the
+    /// deprecated config.yaml secrets.vault)
+    pub vault: Option<String>,
     /// The environment variables read, for an env-backed credential
     pub env_vars: Vec<String>,
     pub secret_file: Option<String>,
@@ -45,6 +49,22 @@ pub struct CredentialInfo {
     /// Why not: the resolver's message, naming what is missing
     pub error: Option<String>,
     pub used_by: CredentialUsersInfo,
+    /// For a `type: vault` credential: where the Vault is, how it logs in and how long it keeps what it read
+    pub vault_connection: Option<VaultConnectionInfo>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct VaultConnectionInfo {
+    pub address: String,
+    /// The KV v2 mount `vault_path` values live under
+    pub mount: String,
+    /// `token` or `kubernetes`
+    pub auth: &'static str,
+    pub kubernetes_role: Option<String>,
+    /// The variable holding its token, for token auth
+    pub token_env: Option<String>,
+    pub timeout_seconds: u64,
+    pub cache_ttl_seconds: u64,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -55,6 +75,8 @@ pub struct FileKeyInfo {
 
 #[derive(Serialize, ToSchema)]
 pub struct CredentialUsersInfo {
+    /// For a `type: vault` credential: the credentials reading from it
+    pub credentials: Vec<String>,
     /// Applications whose connector receives it
     pub applications: Vec<String>,
     pub projects: Vec<String>,
@@ -85,6 +107,7 @@ pub async fn list_credentials(
         let error = check(state.secrets.as_ref(), id).await;
         let users = users_of(
             id,
+            &config.credentials,
             &config.applications,
             &config.projects,
             config.ldap.as_ref(),
@@ -109,12 +132,32 @@ pub async fn list_credentials(
             .collect();
         file_keys.sort_by(|a, b| a.name.cmp(&b.name));
 
+        // The same defaults secrets::build_chain applies.
+        let vault_connection =
+            (credential.credential_type == CredentialType::Vault).then(|| VaultConnectionInfo {
+                address: credential.address.clone().unwrap_or_default(),
+                mount: credential
+                    .mount
+                    .clone()
+                    .unwrap_or_else(|| "secret".to_string()),
+                auth: if credential.kubernetes_role.is_some() {
+                    "kubernetes"
+                } else {
+                    "token"
+                },
+                kubernetes_role: credential.kubernetes_role.clone(),
+                token_env: credential.env_vars.get("token").cloned(),
+                timeout_seconds: credential.timeout_seconds.unwrap_or(10),
+                cache_ttl_seconds: credential.cache_ttl_seconds.unwrap_or(60),
+            });
+
         credentials.push(CredentialInfo {
             name: id.clone(),
             description: credential.description.clone(),
             credential_type: credential.credential_type.name(),
             backend: credential.backend(),
             vault_path: credential.vault_path.clone(),
+            vault: credential.vault.clone(),
             env_vars: credential.env_var_names(),
             secret_file: credential.secret_file.clone(),
             secret_keys,
@@ -122,10 +165,12 @@ pub async fn list_credentials(
             resolves: error.is_none(),
             error,
             used_by: CredentialUsersInfo {
+                credentials: users.credentials,
                 applications: users.applications,
                 projects: users.projects,
                 ldap: users.ldap,
             },
+            vault_connection,
         });
     }
 
