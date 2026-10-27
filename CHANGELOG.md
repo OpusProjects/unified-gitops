@@ -6,6 +6,10 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- A project's last pulls: `history` on each project in `GET /api/v1/projects`, newest first, up to 50, in memory since the process started, as an application's runs are. Each says when it started, how long it took, why (`scheduled`, `manual`, `check` before an application's check or sync, `startup`), who asked a manual one (the API key's name or the signed-in user), how it ended, and the commit it moved the checkout from and to (see `docs/projects.md`).
+
 ## [0.3.0] - 2026-10-27
 
 ### Added

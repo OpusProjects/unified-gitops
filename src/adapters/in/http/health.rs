@@ -71,6 +71,45 @@ pub struct SyncHealthInfo {
     pub consecutive_failures: u32,
 }
 
+// One pull of a project, newest first in its `history`: what the health
+// above sums up, pull by pull. The same shape unified-api reports for its
+// projects' pulls, so one UI table draws both.
+#[derive(Serialize, ToSchema)]
+pub struct RunInfo {
+    /// When it started, unix seconds
+    pub started_at: u64,
+    pub duration_ms: u64,
+    /// "scheduled", "manual" (Pull, the API), "check" (before an
+    /// application's check or sync) or "startup" (the clones at boot, a
+    /// project added by a reload)
+    pub trigger: &'static str,
+    /// Who asked, for a manual pull: the API key's name or the signed-in user
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    /// Why it failed; absent when it worked
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The commit the pull found the checkout at, and left it at
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_before: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
+impl From<crate::domain::sync_health::RunRecord> for RunInfo {
+    fn from(run: crate::domain::sync_health::RunRecord) -> Self {
+        Self {
+            started_at: run.started_at,
+            duration_ms: run.duration_ms,
+            trigger: run.trigger.name(),
+            by: run.by,
+            error: run.error,
+            revision_before: run.revision_before,
+            revision: run.revision,
+        }
+    }
+}
+
 impl From<SyncHealth> for SyncHealthInfo {
     fn from(health: SyncHealth) -> Self {
         Self {

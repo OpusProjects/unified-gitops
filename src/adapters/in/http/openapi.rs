@@ -61,6 +61,7 @@ impl Modify for SecurityAddon {
         http::index::ApiIndex,
         http::health::ReadyStatus,
         http::health::SyncHealthInfo,
+        http::health::RunInfo,
         http::applications::ApplicationSummary,
         http::applications::ApplicationDetail,
         http::applications::PlanInfo,

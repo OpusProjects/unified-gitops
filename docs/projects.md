@@ -134,7 +134,7 @@ the health block exists to expose.
 
 | Route | Meaning |
 |---|---|
-| `GET /api/v1/projects` | Configured projects with `checkout_present`, sync settings and `sync_health` (admin-only) |
+| `GET /api/v1/projects` | Configured projects with `checkout_present`, sync settings, `sync_health` and `history`, their last pulls (admin-only) |
 | `POST /api/v1/projects/{id}/sync` | Clone/update to the branch tip now; `502` with the git error on failure (admin-only) |
 
 Every sync — boot, interval, on demand — records last attempt / last success
@@ -142,3 +142,11 @@ Every sync — boot, interval, on demand — records last attempt / last success
 `unified_gitops_project_sync_consecutive_failures{project}` and
 `unified_gitops_project_sync_last_success_age_seconds{project}` at scrape time —
 see [observability](observability.md).
+
+Each pull is also kept in the project's `history`: its last 50, newest first,
+in memory since the process started (a restart starts them over, as it does
+the health). A row says when the pull started and how long it took, why
+(`scheduled`, `manual`, `check` — the pull before an application's check or
+sync — or `startup`), who asked a manual one, how it ended (`error`), and the
+commit it found the checkout at and left it at (`revision_before`,
+`revision`): when desired state or a script actually changed.

@@ -49,6 +49,10 @@ pub struct ProjectInfo {
     /// visible: `checkout_present` stays true while every pull fails.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync_health: Option<SyncHealthInfo>,
+    /// Its last pulls, newest first (up to 50, kept in memory since this
+    /// process started): when, why and by whom, and the commit each moved
+    /// the checkout from and to.
+    pub history: Vec<crate::adapters::r#in::http::health::RunInfo>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -130,6 +134,12 @@ pub async fn list_projects(
                 connectors: users_of(&config.connectors, id, |p| p.project.as_deref()),
             },
             sync_health: state.project_health.get(id).map(Into::into),
+            history: state
+                .project_health
+                .history(id)
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         });
     }
 
@@ -188,6 +198,10 @@ pub async fn sync_project_now(
             dispatcher: &state.dispatcher,
             catalog: &catalog,
         }),
+        crate::application::projects::RunOrigin {
+            trigger: crate::domain::sync_health::RunTrigger::Manual,
+            by: Some(auth.key_name.as_deref().unwrap_or("open").to_string()),
+        },
     )
     .await;
     let duration_ms = start.elapsed().as_millis();

@@ -80,6 +80,9 @@ pub async fn pull_and_reconcile(
                 dispatcher: r.dispatcher,
                 catalog,
             }),
+            crate::application::projects::RunOrigin::of(
+                crate::domain::sync_health::RunTrigger::Check,
+            ),
         )
         .await
     {
