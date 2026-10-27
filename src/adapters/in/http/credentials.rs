@@ -90,7 +90,14 @@ pub async fn list_credentials(
             config.ldap.as_ref(),
         );
 
-        let mut secret_keys: Vec<String> = credential.secret_keys.keys().cloned().collect();
+        // The delivered names: env_vars' fields when that is what is read
+        // (backend "env" in the new form), secret_keys' otherwise.
+        let delivered = if credential.backend() == "env" && !credential.env_vars.is_empty() {
+            &credential.env_vars
+        } else {
+            &credential.secret_keys
+        };
+        let mut secret_keys: Vec<String> = delivered.keys().cloned().collect();
         secret_keys.sort();
         let mut file_keys: Vec<FileKeyInfo> = credential
             .file_keys
@@ -108,7 +115,7 @@ pub async fn list_credentials(
             credential_type: credential.credential_type.name(),
             backend: credential.backend(),
             vault_path: credential.vault_path.clone(),
-            env_vars: credential.env_vars(),
+            env_vars: credential.env_var_names(),
             secret_file: credential.secret_file.clone(),
             secret_keys,
             file_keys,

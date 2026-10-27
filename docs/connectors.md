@@ -15,7 +15,7 @@ locks, history) is the core's, so every connector gets it without writing it.
 | What the script gets         | Where                                                                |
 | ---------------------------- | -------------------------------------------------------------------- |
 | The application's `config`   | `APPLICATION_CONFIG`, JSON                                           |
-| Each credential field        | `CREDENTIAL_<FIELD>` (`CREDENTIAL_USERNAME`, `CREDENTIAL_PASSWORD`…) |
+| Each credential field        | `CREDENTIAL_<ID>_<FIELD>`, plus `CREDENTIAL_<FIELD>` when no other credential has it ([secrets](secrets.md#what-scripts-receive)) |
 | Permission to write          | `UNIFIED_ALLOW_WRITE=1`, on `apply` only                             |
 | The project's virtualenv     | On `PATH`, when the connector's project has one                         |
 

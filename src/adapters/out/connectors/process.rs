@@ -11,8 +11,9 @@ use crate::ports::connector::{ConnectorCall, ConnectorError, ConnectorFuture, Co
 // - The environment is scrubbed (process_env): the script sees the
 //   passthrough list plus what is injected here, never the service's API-key
 //   secrets or another application's credentials.
-// - APPLICATION_CONFIG carries the application's config as JSON, CREDENTIAL_<FIELD> each
-//   resolved credential field.
+// - APPLICATION_CONFIG carries the application's config as JSON, CREDENTIAL_<KEY> each
+//   resolved credential key (<id>_<field>, and <field> when unique — see
+//   application::credentials).
 // - UNIFIED_ALLOW_WRITE=1 only on `apply`. A shared script that reads for
 //   unified-api and writes for gitops refuses to write without it — and
 //   unified-api, whose environment is scrubbed too, never sets it.

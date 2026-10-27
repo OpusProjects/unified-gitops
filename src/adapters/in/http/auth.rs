@@ -95,16 +95,21 @@ pub fn resolve_api_keys(cfg: &crate::config::AppConfig) -> Result<Vec<ResolvedAp
 
     for id in ids {
         let def = &cfg.api_keys[id];
-        let secret = std::env::var(&def.env).map_err(|_| {
+        // Validation already refused a key naming no variable; this is the
+        // same refusal for a configuration built without it.
+        let var = def
+            .env_var()
+            .ok_or_else(|| format!("API key '{}' names no env var for its secret", id))?;
+        let secret = std::env::var(var).map_err(|_| {
             format!(
                 "API key '{}' expects the secret in env var '{}', which is not set",
-                id, def.env
+                id, var
             )
         })?;
         if secret.is_empty() {
             return Err(format!(
                 "API key '{}': env var '{}' is set but empty",
-                id, def.env
+                id, var
             ));
         }
 
@@ -389,7 +394,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.path().join("credentials.yaml"),
-            "credentials:\n  - name: cred-ldap\n    type: username_password\n    env_prefix: \"LDAP\"\n",
+            "credentials:\n  - name: cred-ldap\n    type: username_password\n    env_vars:\n      username: LDAP_USER\n",
         )
         .unwrap();
         let cfg = crate::config::load_config(dir.path().to_str().unwrap()).unwrap();
