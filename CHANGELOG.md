@@ -6,9 +6,12 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-27
+
 ### Added
 
 - Project webhooks: a webhook's `projects:` (`all`, or names) hears the projects' own events and those of every application reading from them, including applications added later, combined with `applications:`; three project events, `commit_pulled` (the commits a pull brought, newest first with author and subject, whether history was rewritten, and the applications whose folders changed), `pull_failed` and `pull_recovered`, each sent once per change of state; application messages and the send history now name the project, and `GET /api/v1/webhooks` adds `all_projects`, `projects` and `project_applications` (see `docs/webhooks.md`).
+- The web UI from unified-ui 0.4.0: project webhooks on the Webhooks pages, and the Webhooks card always on the Overview.
 
 ## [0.2.0] - 2026-10-26
 
@@ -35,6 +38,7 @@ First version: GitOps for anything with an API.
 - Configuration as code, one item per file, validated strictly, reloadable live and pushable over the configuration API.
 - API keys and LDAP sign-in, secrets from env or Vault, Prometheus metrics, and the web UI from unified-ui 0.2.0.
 
-[Unreleased]: https://github.com/OpusProjects/unified-gitops/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/OpusProjects/unified-gitops/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/OpusProjects/unified-gitops/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/OpusProjects/unified-gitops/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/OpusProjects/unified-gitops/releases/tag/v0.1.0
