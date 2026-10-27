@@ -9,14 +9,17 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{Semaphore, mpsc};
 use utoipa::ToSchema;
 
+use crate::domain::app::Application;
 use crate::domain::run::{Baseline, RunMode, RunRecord, RunResult, SyncStatus, Trigger, now};
 use crate::domain::webhook::{
     Auth, AuthScheme, Event, HttpTarget, JobTemplateTarget, Webhook, WebhookType,
 };
+use crate::ports::git::CommitRange;
 use crate::ports::http_sender::{HttpSenderPort, OutboundRequest, OutboundResponse, SendError};
 use crate::ports::secrets::SecretsPort;
 
-// The use case "tell someone what happened to an application".
+// The use case "tell someone what happened to an application, or to the
+// checkout of a project".
 //
 // After every run, `detect` compares where the application stood before it
 // (its Baseline) with what the run found and did, and names at most one
@@ -131,6 +134,8 @@ const MESSAGE_ERROR_CHARS: usize = 500;
 
 pub struct RunOutcome<'a> {
     pub application: &'a str,
+    // The project it reads from: what a webhook's `projects:` matches.
+    pub project: &'a str,
     pub description: Option<&'a str>,
     // server.url, for a link to the application in the UI.
     pub base_url: Option<&'a str>,
@@ -191,6 +196,7 @@ pub fn message(o: &RunOutcome<'_>) -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("event".into(), json!(o.detected.event.as_str()));
     m.insert("application".into(), json!(o.application));
+    m.insert("project".into(), json!(o.project));
     m.insert("description".into(), json!(o.description));
     m.insert("status".into(), json!(o.status));
     m.insert("previous_status".into(), json!(o.before.status));
@@ -219,6 +225,7 @@ pub fn test_message(webhook_id: &str, base_url: Option<&str>) -> Map<String, Val
     let mut m = Map::new();
     m.insert("event".into(), json!("test"));
     m.insert("application".into(), Value::Null);
+    m.insert("project".into(), Value::Null);
     m.insert(
         "description".into(),
         json!(format!("Test of webhook {webhook_id}")),
@@ -510,6 +517,9 @@ fn hex(bytes: &[u8]) -> String {
 pub struct Delivery {
     pub event: String,
     pub application: Option<String>,
+    // The project it was about: a project event's own, or the project the
+    // application reads from.
+    pub project: Option<String>,
     // Unix seconds.
     pub at: u64,
     pub ok: bool,
@@ -574,6 +584,8 @@ pub struct Dispatcher {
     pub log: Arc<DeliveryLog>,
     // Messages queued or being sent: what QUEUE bounds and drain waits for.
     pending: Arc<std::sync::atomic::AtomicUsize>,
+    // Which projects' pulls are failing, as told so far.
+    pub pulls: PullStates,
 }
 
 impl Default for Dispatcher {
@@ -590,6 +602,7 @@ impl Dispatcher {
             rx: std::sync::Mutex::new(Some(rx)),
             log: Arc::new(DeliveryLog::default()),
             pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pulls: PullStates::default(),
         }
     }
 
@@ -682,9 +695,15 @@ pub async fn deliver(
         .get("application")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let project = job
+        .message
+        .get("project")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let mut delivery = Delivery {
         event: event.clone(),
         application,
+        project,
         at: now(),
         ok: false,
         attempts: 0,
@@ -800,13 +819,16 @@ pub fn after_run(
     let event = outcome.detected.event;
     let mut wanted: Vec<(&String, &Webhook)> = webhooks
         .iter()
-        .filter(|(_, n)| n.wants(event, outcome.application))
+        .filter(|(_, n)| n.wants(event, outcome.application, outcome.project))
         .collect();
     if wanted.is_empty() {
         return;
     }
     wanted.sort_by(|a, b| a.0.cmp(b.0));
-    let base = message(outcome);
+    send_to(dispatcher, wanted, message(outcome));
+}
+
+fn send_to(dispatcher: &Dispatcher, wanted: Vec<(&String, &Webhook)>, base: Map<String, Value>) {
     for (id, webhook) in wanted {
         let mut m = base.clone();
         m.insert("webhook".into(), json!(id));
@@ -816,6 +838,190 @@ pub fn after_run(
             message: m,
         });
     }
+}
+
+// Projects whose pulls are failing, and since when (unix seconds). A failure
+// is told when a project starts failing and a success when it stops, the
+// same rule as an application's sync_failed and back_in_sync. Kept apart
+// from the project's sync_health on purpose: health counts every attempt,
+// this remembers what was TOLD, so a failure before the webhooks could send
+// (or before a webhook asked for it) still ends in a recovery that matches.
+#[derive(Default)]
+pub struct PullStates {
+    failing: DashMap<String, u64>,
+}
+
+impl PullStates {
+    // A pull failed. True when the project was not failing before.
+    pub fn failed(&self, project: &str) -> bool {
+        match self.failing.entry(project.to_string()) {
+            dashmap::Entry::Vacant(entry) => {
+                entry.insert(now());
+                true
+            }
+            dashmap::Entry::Occupied(_) => false,
+        }
+    }
+
+    // A pull worked. Since when it had been failing, if it had.
+    pub fn succeeded(&self, project: &str) -> Option<u64> {
+        self.failing.remove(project).map(|(_, since)| since)
+    }
+}
+
+// What one pull of a project has to tell.
+pub enum PullEvent<'a> {
+    CommitPulled {
+        // HEAD before the pull.
+        from: &'a str,
+        // None when git could not list what came in.
+        range: Option<&'a CommitRange>,
+    },
+    PullFailed {
+        error: &'a str,
+        consecutive_failures: u32,
+    },
+    PullRecovered {
+        failing_seconds: u64,
+    },
+}
+
+impl PullEvent<'_> {
+    fn event(&self) -> Event {
+        match self {
+            PullEvent::CommitPulled { .. } => Event::CommitPulled,
+            PullEvent::PullFailed { .. } => Event::PullFailed,
+            PullEvent::PullRecovered { .. } => Event::PullRecovered,
+        }
+    }
+}
+
+pub struct PullOutcome<'a> {
+    pub project: &'a str,
+    pub description: Option<&'a str>,
+    // server.url, for a link to the project in the UI.
+    pub base_url: Option<&'a str>,
+    // The commit the checkout is at now.
+    pub revision: Option<&'a str>,
+    // The configured applications, to name those a commit touched.
+    pub applications: &'a HashMap<String, Application>,
+    pub event: PullEvent<'a>,
+}
+
+// Commits listed in one message, and how much of each subject: enough to
+// say what changed, not a changelog.
+pub const MESSAGE_COMMITS: usize = 20;
+const MESSAGE_SUBJECT_CHARS: usize = 200;
+
+// The applications reading from `project` whose folder holds one of `paths`.
+// An application at the repository's root takes every path.
+pub fn touched_applications(
+    applications: &HashMap<String, Application>,
+    project: &str,
+    paths: &[String],
+) -> Vec<String> {
+    let mut touched: Vec<String> = applications
+        .iter()
+        .filter(|(_, app)| app.project == project)
+        .filter(|(_, app)| {
+            let folder = app.folder().trim_start_matches("./");
+            folder == "."
+                || paths.iter().any(|p| {
+                    p.strip_prefix(folder)
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+                })
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    touched.sort();
+    touched
+}
+
+// A project event's message: the same envelope as an application's (event,
+// description, revision, at, url, webhook), with what the event adds. Commit
+// authors and subjects leave this process, as in any git host's push
+// webhook; file contents never do.
+pub fn pull_message(o: &PullOutcome<'_>) -> Map<String, Value> {
+    let mut m = Map::new();
+    m.insert("event".into(), json!(o.event.event().as_str()));
+    m.insert("application".into(), Value::Null);
+    m.insert("project".into(), json!(o.project));
+    m.insert("description".into(), json!(o.description));
+    m.insert("revision".into(), json!(o.revision));
+    match &o.event {
+        PullEvent::CommitPulled { from, range } => {
+            m.insert("previous_revision".into(), json!(from));
+            let commits: Vec<Value> = range
+                .map(|r| {
+                    r.commits
+                        .iter()
+                        .take(MESSAGE_COMMITS)
+                        .map(|c| {
+                            json!({
+                                "revision": c.revision,
+                                "author": c.author,
+                                "message": c.message.chars().take(MESSAGE_SUBJECT_CHARS).collect::<String>(),
+                                "at": rfc3339(c.at),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            m.insert("commits".into(), Value::Array(commits));
+            m.insert(
+                "more_commits".into(),
+                json!(range.is_none_or(|r| r.more || r.commits.len() > MESSAGE_COMMITS)),
+            );
+            m.insert("forced".into(), json!(range.is_some_and(|r| r.forced)));
+            m.insert(
+                "applications".into(),
+                json!(
+                    range
+                        .and_then(|r| r.paths.as_deref())
+                        .map(|paths| touched_applications(o.applications, o.project, paths))
+                ),
+            );
+        }
+        PullEvent::PullFailed {
+            error,
+            consecutive_failures,
+        } => {
+            let error: String = error.chars().take(MESSAGE_ERROR_CHARS).collect();
+            m.insert("errors".into(), json!([error]));
+            m.insert("consecutive_failures".into(), json!(consecutive_failures));
+        }
+        PullEvent::PullRecovered { failing_seconds } => {
+            m.insert("failing_seconds".into(), json!(failing_seconds));
+        }
+    }
+    m.insert("at".into(), json!(rfc3339(now())));
+    m.insert(
+        "url".into(),
+        json!(
+            o.base_url
+                .map(|base| format!("{base}/projects/{}", o.project))
+        ),
+    );
+    m
+}
+
+// After a pull: queues its event for every webhook that wants it from this
+// project.
+pub fn after_pull(
+    dispatcher: &Dispatcher,
+    webhooks: &HashMap<String, Webhook>,
+    outcome: &PullOutcome<'_>,
+) {
+    let event = outcome.event.event();
+    let mut wanted: Vec<(&String, &Webhook)> = webhooks
+        .iter()
+        .filter(|(_, n)| n.wants_project(event, outcome.project))
+        .collect();
+    if wanted.is_empty() {
+        return;
+    }
+    wanted.sort_by(|a, b| a.0.cmp(b.0));
+    send_to(dispatcher, wanted, pull_message(outcome));
 }
 
 #[cfg(test)]
@@ -1120,6 +1326,7 @@ mod tests {
         let detected = Detected::new(Event::SyncSucceeded, Some(Cause::Commit), None);
         message(&RunOutcome {
             application: "portainer",
+            project: "prj",
             description: Some("Portainer"),
             base_url: Some("https://gitops.example.com"),
             before: &before,
@@ -1289,5 +1496,36 @@ mod tests {
             status: 401,
             body: String::new()
         })));
+    }
+
+    #[test]
+    fn a_commit_touches_the_applications_whose_folder_it_changed() {
+        let app = |project: &str, path: &str| -> Application {
+            serde_saphyr::from_str(&format!("connector: c\nproject: {project}\npath: {path}\n"))
+                .unwrap()
+        };
+        let apps = HashMap::from([
+            ("demo".to_string(), app("p", "apps/demo")),
+            ("demo2".to_string(), app("p", "apps/demo2/")),
+            ("root".to_string(), app("p", ".")),
+            ("elsewhere".to_string(), app("q", "apps/demo")),
+        ]);
+        let touched = |paths: &[&str]| {
+            let paths: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+            touched_applications(&apps, "p", &paths)
+        };
+        // A path under apps/demo2 is not under apps/demo; the root takes all.
+        assert_eq!(touched(&["apps/demo2/x.yaml"]), ["demo2", "root"]);
+        assert_eq!(touched(&["apps/demo/x.yaml"]), ["demo", "root"]);
+        assert_eq!(touched(&["README.md"]), ["root"]);
+    }
+
+    #[test]
+    fn a_failing_project_is_told_once_and_its_recovery_once() {
+        let pulls = PullStates::default();
+        assert!(pulls.failed("p"));
+        assert!(!pulls.failed("p"));
+        assert!(pulls.succeeded("p").is_some());
+        assert!(pulls.succeeded("p").is_none());
     }
 }

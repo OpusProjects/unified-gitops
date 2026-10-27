@@ -347,3 +347,111 @@ async fn a_project_lists_what_uses_it() {
     );
     assert_eq!(by_id("prj-test")["timeout_seconds"], 300);
 }
+
+async fn head(dir: &Path) -> String {
+    CliGit::new().revision(dir).await.expect("a revision")
+}
+
+async fn commit_file(origin: &Path, file: &str, body: &str, message: &str) {
+    let path = origin.join(file);
+    tokio::fs::create_dir_all(path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&path, body).await.unwrap();
+    run(origin, &["add", "."]).await;
+    run(origin, &["commit", "-m", message]).await;
+}
+
+#[tokio::test]
+async fn commits_lists_what_a_shallow_pull_brought() {
+    let (origin, url) = make_origin().await;
+    let workdir = tempfile::tempdir().unwrap();
+    let checkout = workdir.path().join("prj-test");
+    let git = CliGit::new();
+    let project = project(&url);
+    git.ensure(&checkout, &project, &HashMap::new())
+        .await
+        .unwrap();
+    let from = head(&checkout).await;
+
+    // Three commits land; the pull fetches only the tip.
+    commit_file(origin.path(), "apps/a/x.yaml", "a: 1\n", "add a").await;
+    commit_file(origin.path(), "apps/b/x.yaml", "b: 1\n", "add b").await;
+    commit_file(origin.path(), "apps/a/x.yaml", "a: 2\n", "change a").await;
+    git.ensure(&checkout, &project, &HashMap::new())
+        .await
+        .unwrap();
+    let to = head(&checkout).await;
+
+    let range = git
+        .commits(&checkout, &project, &HashMap::new(), &from, &to, 20)
+        .await
+        .expect("commits");
+    let messages: Vec<&str> = range.commits.iter().map(|c| c.message.as_str()).collect();
+    assert_eq!(messages, ["change a", "add b", "add a"]);
+    assert_eq!(range.commits[0].revision, to);
+    assert_eq!(range.commits[0].author, "test");
+    assert!(range.fetched, "the shallow checkout needed deepening");
+    assert!(!range.more && !range.forced);
+    let mut paths = range.paths.expect("paths");
+    paths.sort();
+    assert_eq!(paths, ["apps/a/x.yaml", "apps/b/x.yaml"]);
+
+    // A cap shorter than what came in says there is more.
+    let capped = git
+        .commits(&checkout, &project, &HashMap::new(), &from, &to, 2)
+        .await
+        .unwrap();
+    assert_eq!(capped.commits.len(), 2);
+    assert!(capped.more);
+}
+
+#[tokio::test]
+async fn commits_tells_a_rewritten_history() {
+    let (origin, url) = make_origin().await;
+    commit_file(origin.path(), "apps/a/x.yaml", "a: 1\n", "add a").await;
+    let workdir = tempfile::tempdir().unwrap();
+    let checkout = workdir.path().join("prj-test");
+    let git = CliGit::new();
+    let project = project(&url);
+    git.ensure(&checkout, &project, &HashMap::new())
+        .await
+        .unwrap();
+    let from = head(&checkout).await;
+
+    // The last commit is replaced (amend + force push, as far as a clone
+    // can tell).
+    tokio::fs::write(origin.path().join("apps/a/x.yaml"), "a: 9\n")
+        .await
+        .unwrap();
+    run(
+        origin.path(),
+        &["commit", "-a", "--amend", "-m", "add a, again"],
+    )
+    .await;
+    git.ensure(&checkout, &project, &HashMap::new())
+        .await
+        .unwrap();
+    let to = head(&checkout).await;
+    assert_ne!(from, to);
+
+    let range = git
+        .commits(&checkout, &project, &HashMap::new(), &from, &to, 20)
+        .await
+        .unwrap();
+    assert!(range.forced, "{range:?}");
+    assert_eq!(range.commits[0].message, "add a, again");
+    assert_eq!(range.paths.unwrap(), ["apps/a/x.yaml"]);
+}
+
+#[tokio::test]
+async fn commits_refuses_what_is_not_a_commit_id() {
+    let git = CliGit::new();
+    let project = project("file:///nowhere");
+    let dir = tempfile::tempdir().unwrap();
+    let err = git
+        .commits(dir.path(), &project, &HashMap::new(), "--all", "abcd", 20)
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("not a commit id"), "{}", err.message);
+}

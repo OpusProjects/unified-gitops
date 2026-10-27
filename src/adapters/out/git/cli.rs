@@ -141,6 +141,165 @@ impl GitPort for CliGit {
         })
     }
 
+    // `from` was HEAD before the pull and is still in the object store, so
+    // the paths between the two are a local diff. The commits are not: the
+    // pull fetched only the tip, so when `from` is not yet an ancestor of
+    // `to` the history is deepened once by `max` commits, never unshallowed
+    // (a repository's whole history is not worth one message).
+    #[allow(clippy::too_many_arguments)]
+    fn commits<'a>(
+        &'a self,
+        dir: &'a Path,
+        project: &'a GitProject,
+        credentials: &'a HashMap<String, String>,
+        from: &'a str,
+        to: &'a str,
+        max: usize,
+    ) -> crate::ports::git::CommitsFuture<'a> {
+        Box::pin(async move {
+            use crate::ports::git::{Commit, CommitRange};
+            for revision in [from, to] {
+                if !(4..=64).contains(&revision.len())
+                    || !revision.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    return Err(GitError {
+                        message: format!("'{revision}' is not a commit id"),
+                    });
+                }
+            }
+            let dir_s = path_str(dir)?;
+            let local = |args: Vec<String>| async move {
+                Command::new("git")
+                    .arg("-C")
+                    .arg(dir_s)
+                    .args(args)
+                    .env("GIT_TERMINAL_PROMPT", "0")
+                    .kill_on_drop(true)
+                    .output()
+                    .await
+                    .map_err(|e| GitError {
+                        message: format!("git: {e}"),
+                    })
+            };
+            let is_ancestor = || async {
+                local(vec![
+                    "merge-base".into(),
+                    "--is-ancestor".into(),
+                    from.into(),
+                    to.into(),
+                ])
+                .await
+                .map(|o| o.status.success())
+            };
+            let shallow = || async {
+                local(vec!["rev-parse".into(), "--is-shallow-repository".into()])
+                    .await
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+            };
+
+            let mut range = CommitRange::default();
+            let mut ancestor = is_ancestor().await?;
+            if !ancestor && shallow().await? {
+                let depth = format!("--deepen={max}");
+                run_git(
+                    &[
+                        "-C",
+                        dir_s,
+                        "fetch",
+                        "--quiet",
+                        &depth,
+                        "origin",
+                        &project.branch,
+                    ],
+                    &auth_env(credentials),
+                )
+                .await?;
+                range.fetched = true;
+                ancestor = is_ancestor().await?;
+            }
+            // Fields split by the unit separator, which no name or subject
+            // carries; one commit per line.
+            let mut log_args: Vec<String> =
+                vec!["log".into(), "--format=%H%x1f%an%x1f%ct%x1f%s".into()];
+            if ancestor {
+                log_args.extend([format!("-n{}", max + 1), to.into(), format!("^{from}")]);
+            } else {
+                // A rewrite, or a history deeper than `max`. `from` was a
+                // shallow tip, its parents unknown, so `^from` would not
+                // exclude the history both share: only the new tip is
+                // certain. It is a rewrite for sure only when the new history
+                // was there whole (no shallow boundary behind `to`) and
+                // `from` is not in it.
+                log_args.extend(["-n1".into(), to.into()]);
+                range.more = true;
+                let git_path = local(vec![
+                    "rev-parse".into(),
+                    "--git-path".into(),
+                    "shallow".into(),
+                ])
+                .await?;
+                let shallow_file = dir.join(String::from_utf8_lossy(&git_path.stdout).trim());
+                let mut whole = true;
+                if let Ok(boundaries) = tokio::fs::read_to_string(&shallow_file).await {
+                    for boundary in boundaries.lines().filter(|l| !l.is_empty()) {
+                        let behind = local(vec![
+                            "merge-base".into(),
+                            "--is-ancestor".into(),
+                            boundary.into(),
+                            to.into(),
+                        ])
+                        .await?;
+                        if behind.status.success() {
+                            whole = false;
+                            break;
+                        }
+                    }
+                }
+                range.forced = whole;
+            }
+            let log = local(log_args).await?;
+            if log.status.success() {
+                for line in String::from_utf8_lossy(&log.stdout).lines() {
+                    let mut fields = line.splitn(4, '\u{1f}');
+                    let (Some(revision), Some(author), Some(at), Some(message)) =
+                        (fields.next(), fields.next(), fields.next(), fields.next())
+                    else {
+                        continue;
+                    };
+                    range.commits.push(Commit {
+                        revision: revision.to_string(),
+                        author: author.to_string(),
+                        message: message.to_string(),
+                        at: at.parse().unwrap_or(0),
+                    });
+                }
+            }
+            if range.commits.len() > max {
+                range.commits.truncate(max);
+                range.more = true;
+            }
+
+            let diff = local(vec![
+                "diff".into(),
+                "--name-only".into(),
+                "-z".into(),
+                from.into(),
+                to.into(),
+            ])
+            .await?;
+            if diff.status.success() {
+                range.paths = Some(
+                    String::from_utf8_lossy(&diff.stdout)
+                        .split('\0')
+                        .filter(|p| !p.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                );
+            }
+            Ok(range)
+        })
+    }
+
     // `git archive` streams the tree at that commit straight from the object
     // store; `tar` unpacks it. Nothing in the checkout moves, so a pull
     // running at the same time cannot be confused by it, nor it by the pull.

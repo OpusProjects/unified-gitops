@@ -199,7 +199,12 @@ async fn main() {
                     let venv = std::sync::Arc::clone(&venv);
                     let project_health = std::sync::Arc::clone(&project_health);
                     let projects_dir = projects_dir.clone();
+                    let state = std::sync::Arc::clone(&state);
                     clones.spawn(async move {
+                        // A pull at boot tells what it brought too: commits
+                        // pushed while this instance was down.
+                        let config = state.config();
+                        let catalog = config.catalog();
                         match unified_gitops::application::projects::sync_project(
                             &*git,
                             &*secrets,
@@ -208,6 +213,10 @@ async fn main() {
                             &project_id,
                             &project,
                             &projects_dir,
+                            Some(unified_gitops::application::projects::Announce {
+                                dispatcher: &state.dispatcher,
+                                catalog: &catalog,
+                            }),
                         )
                         .await
                         {

@@ -6,6 +6,10 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Project webhooks: a webhook's `projects:` (`all`, or names) hears the projects' own events and those of every application reading from them, including applications added later, combined with `applications:`; three project events, `commit_pulled` (the commits a pull brought, newest first with author and subject, whether history was rewritten, and the applications whose folders changed), `pull_failed` and `pull_recovered`, each sent once per change of state; application messages and the send history now name the project, and `GET /api/v1/webhooks` adds `all_projects`, `projects` and `project_applications` (see `docs/webhooks.md`).
+
 ## [0.2.0] - 2026-10-26
 
 ### Added

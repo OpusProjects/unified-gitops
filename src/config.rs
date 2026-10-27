@@ -538,14 +538,21 @@ impl AppConfig {
             }
         }
 
-        // Webhooks: their own settings, then the applications they listen
-        // to and the credentials they send with.
+        // Webhooks: their own settings, then the applications and projects
+        // they listen to and the credentials they send with.
         for (id, webhook) in &self.webhooks {
             errors.extend(webhook.errors(id));
             for app_id in webhook.applications.named() {
                 if !self.applications.contains_key(app_id) {
                     errors.push(format!(
                         "Webhook '{id}' references unknown application '{app_id}'"
+                    ));
+                }
+            }
+            for project_id in webhook.projects.named() {
+                if !self.projects.contains_key(project_id) {
+                    errors.push(format!(
+                        "Webhook '{id}' references unknown project '{project_id}'"
                     ));
                 }
             }
@@ -978,12 +985,16 @@ mod tests {
             ("applications/portainer.yaml", APPLICATION),
             (
                 "webhooks/n.yaml",
-                "webhooks:\n  - name: n\n    type: webhook\n    events: [sync_failed]\n    applications: [portainr]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-nope]\n",
+                "webhooks:\n  - name: n\n    type: webhook\n    events: [sync_failed]\n    applications: [portainr]\n    projects: [prj-nope]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-nope]\n",
             ),
         ]);
         let err = load_err(&dir);
         assert!(
             err.contains("Webhook 'n' references unknown application 'portainr'"),
+            "{err}"
+        );
+        assert!(
+            err.contains("Webhook 'n' references unknown project 'prj-nope'"),
             "{err}"
         );
         assert!(
