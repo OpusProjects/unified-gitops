@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -21,6 +21,51 @@ pub struct SyncHealth {
     /// Failed attempts since the last success — 0 while healthy
     pub consecutive_failures: u32,
 }
+
+// What started a pull: the timer, a person (Pull, the API), a check or sync
+// of an application (each pulls its project first), or the process itself
+// (the clones at boot, a project added by a reload).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunTrigger {
+    Scheduled,
+    Manual,
+    Check,
+    Startup,
+}
+
+impl RunTrigger {
+    pub fn name(self) -> &'static str {
+        match self {
+            RunTrigger::Scheduled => "scheduled",
+            RunTrigger::Manual => "manual",
+            RunTrigger::Check => "check",
+            RunTrigger::Startup => "startup",
+        }
+    }
+}
+
+// One pull, as the history keeps it: when, why and by whom, how it ended,
+// and the commit it moved the checkout from and to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunRecord {
+    /// When it started, unix seconds
+    pub started_at: u64,
+    pub duration_ms: u64,
+    pub trigger: RunTrigger,
+    /// Who asked, for a manual pull: the API key's name or the signed-in user
+    pub by: Option<String>,
+    /// Why it failed; None when it worked
+    pub error: Option<String>,
+    pub revision_before: Option<String>,
+    pub revision: Option<String>,
+}
+
+// How many pulls each project keeps. In memory only, like the health above
+// and an application's run history: a restart starts it over.
+pub const HISTORY: usize = 50;
+
+// An error is kept whole up to this length: git's stderr can be long.
+const HISTORY_ERROR: usize = 2000;
 
 // What is stored internally: Instants, converted to ages when read.
 #[derive(Debug)]
@@ -48,6 +93,9 @@ struct Record {
 #[derive(Debug, Default)]
 pub struct SyncHealthRegistry {
     inner: Mutex<HashMap<String, Record>>,
+    // The last runs of each id, newest first: what the health above sums up
+    // (the last attempt, the streak), one row per run.
+    history: Mutex<HashMap<String, VecDeque<RunRecord>>>,
 }
 
 impl SyncHealthRegistry {
@@ -112,11 +160,69 @@ impl SyncHealthRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         f(&mut map)
     }
+
+    // Keeps one run in the id's history, newest first, the oldest dropped
+    // past HISTORY.
+    pub fn record_run(&self, id: &str, mut run: RunRecord) {
+        if let Some(error) = &mut run.error
+            && error.len() > HISTORY_ERROR
+        {
+            let mut cut = HISTORY_ERROR;
+            while !error.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            error.truncate(cut);
+            error.push('…');
+        }
+        let mut map = self
+            .history
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runs = map.entry(id.to_string()).or_default();
+        runs.push_front(run);
+        runs.truncate(HISTORY);
+    }
+
+    // The id's runs, newest first; empty when it has none yet.
+    pub fn history(&self, id: &str) -> Vec<RunRecord> {
+        let map = self
+            .history
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        map.get(id)
+            .map(|runs| runs.iter().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run(started_at: u64) -> RunRecord {
+        RunRecord {
+            started_at,
+            duration_ms: 10,
+            trigger: RunTrigger::Scheduled,
+            by: None,
+            error: None,
+            revision_before: None,
+            revision: None,
+        }
+    }
+
+    #[test]
+    fn the_history_is_newest_first_and_keeps_the_last_fifty() {
+        let registry = SyncHealthRegistry::new();
+        assert!(registry.history("prj-a").is_empty());
+        for at in 0..60 {
+            registry.record_run("prj-a", run(at));
+        }
+        let history = registry.history("prj-a");
+        assert_eq!(history.len(), HISTORY);
+        assert_eq!(history[0].started_at, 59, "newest first");
+        assert_eq!(history[HISTORY - 1].started_at, 10, "the oldest dropped");
+    }
 
     #[test]
     fn unknown_source_has_no_health() {

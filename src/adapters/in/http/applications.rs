@@ -260,6 +260,8 @@ async fn run_now(
 ) -> Result<Json<RunRecord>, ApiError> {
     let config = state.config();
     visible(&config, &auth, &id)?;
+    // Named as a project's own Pull names it (http::projects).
+    let by = Some(auth.key_name.as_deref().unwrap_or("open").to_string());
     let record = detached(async move {
         let record = pull_and_reconcile(
             &state.reconciler(),
@@ -267,6 +269,7 @@ async fn run_now(
             &id,
             mode,
             Trigger::Manual,
+            by,
         )
         .await?;
         crate::adapters::r#in::http::audit::record(

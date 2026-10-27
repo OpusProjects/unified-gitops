@@ -217,6 +217,9 @@ async fn main() {
                                 dispatcher: &state.dispatcher,
                                 catalog: &catalog,
                             }),
+                            unified_gitops::application::projects::RunOrigin::of(
+                                unified_gitops::domain::sync_health::RunTrigger::Startup,
+                            ),
                         )
                         .await
                         {

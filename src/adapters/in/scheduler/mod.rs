@@ -180,6 +180,7 @@ async fn scheduled_reconcile(
         app_id,
         mode,
         Trigger::Schedule,
+        None,
     )
     .await
     {
@@ -228,6 +229,9 @@ async fn scheduled_project_pull(
             dispatcher: &state.dispatcher,
             catalog: &catalog,
         }),
+        crate::application::projects::RunOrigin::of(
+            crate::domain::sync_health::RunTrigger::Scheduled,
+        ),
     )
     .await
     {
@@ -366,6 +370,9 @@ fn clone_missing_checkouts(state: Arc<AppState>) -> Vec<tokio::task::JoinHandle<
                     dispatcher: &state.dispatcher,
                     catalog: &catalog,
                 }),
+                crate::application::projects::RunOrigin::of(
+                    crate::domain::sync_health::RunTrigger::Startup,
+                ),
             )
             .await
             {
