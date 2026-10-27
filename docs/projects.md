@@ -150,3 +150,9 @@ the health). A row says when the pull started and how long it took, why
 sync — or `startup`), who asked a manual one, how it ended (`error`), and the
 commit it found the checkout at and left it at (`revision_before`,
 `revision`): when desired state or a script actually changed.
+
+Both commits are read while the pull holds the checkout, so two pulls at once
+never take credit for each other's move. A `check` pull runs once per
+application per check, so it is kept only when it moved the commit or failed;
+the health above still counts every one. A manual Check or Sync of an
+application names who asked on its `check` pull, as a project's Pull does.

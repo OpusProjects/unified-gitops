@@ -368,6 +368,7 @@ async fn failed_rollbacks_do_not_pause_and_checks_never_apply_over_one() {
         "demo",
         RunMode::Apply,
         Trigger::Schedule,
+        None,
     )
     .await
     .unwrap();

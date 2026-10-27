@@ -180,6 +180,7 @@ async fn scheduled_reconcile(
         app_id,
         mode,
         Trigger::Schedule,
+        None,
     )
     .await
     {

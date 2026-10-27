@@ -67,7 +67,15 @@ struct Moved {
     range: Option<CommitRange>,
 }
 
-#[allow(clippy::too_many_arguments)]
+// What `run` did, and the commit the checkout was at before and after it —
+// both read while it held the checkout's write lock, so another pull of the
+// same checkout cannot slip in between and have its move counted as ours.
+struct Pulled {
+    result: Result<Option<Moved>, String>,
+    before: Option<String>,
+    after: Option<String>,
+}
+
 // What started a pull and who asked, for the project's history.
 #[derive(Debug, Clone)]
 pub struct RunOrigin {
@@ -96,9 +104,6 @@ pub async fn sync_project(
 ) -> Result<(), String> {
     let started_at = crate::domain::unix_now();
     let start = std::time::Instant::now();
-    // The commit before and after, on every pull (`run` reports a move only
-    // when there was one): what the history shows the checkout went over.
-    let before = git.revision(&projects_dir.join(project_id)).await;
     // Listing commits can take a fetch: only when someone will read them.
     let list_commits = announce.is_some_and(|a| {
         a.catalog
@@ -106,7 +111,11 @@ pub async fn sync_project(
             .values()
             .any(|w| w.wants_project(Event::CommitPulled, project_id))
     });
-    let result = run(
+    let Pulled {
+        result,
+        before,
+        after,
+    } = run(
         git,
         secrets,
         venv,
@@ -121,21 +130,27 @@ pub async fn sync_project(
         Ok(_) => health.record_success(project_id),
         Err(error) => health.record_failure(project_id, error),
     }
-    health.record_run(
-        project_id,
-        RunRecord {
-            started_at,
-            duration_ms: start.elapsed().as_millis() as u64,
-            trigger: origin.trigger,
-            by: origin.by,
-            error: result.as_ref().err().cloned(),
-            revision_before: before,
-            revision: git.revision(&projects_dir.join(project_id)).await,
-        },
-    );
+    // Every application check pulls first, one per application per tick: kept
+    // whole, those pulls would push everything else out of the history within
+    // the hour. One that moved the commit or failed is what a reader looks
+    // for; the rest are in the health above.
+    let worth_keeping = origin.trigger != RunTrigger::Check || result.is_err() || before != after;
+    if worth_keeping {
+        health.record_run(
+            project_id,
+            RunRecord {
+                started_at,
+                duration_ms: start.elapsed().as_millis() as u64,
+                trigger: origin.trigger,
+                by: origin.by,
+                error: result.as_ref().err().cloned(),
+                revision_before: before,
+                revision: after.clone(),
+            },
+        );
+    }
 
     if let Some(announce) = announce {
-        let dir = projects_dir.join(project_id);
         let tell = |revision: Option<&str>, event: PullEvent<'_>| {
             after_pull(
                 announce.dispatcher,
@@ -153,9 +168,8 @@ pub async fn sync_project(
         match &result {
             Ok(moved) => {
                 if let Some(since) = announce.dispatcher.pulls.succeeded(project_id) {
-                    let revision = git.revision(&dir).await;
                     tell(
-                        revision.as_deref(),
+                        after.as_deref(),
                         PullEvent::PullRecovered {
                             failing_seconds: crate::domain::run::now().saturating_sub(since),
                         },
@@ -173,13 +187,12 @@ pub async fn sync_project(
             }
             Err(error) => {
                 if announce.dispatcher.pulls.failed(project_id) {
-                    let revision = git.revision(&dir).await;
                     let consecutive_failures = health
                         .get(project_id)
                         .map(|h| h.consecutive_failures)
                         .unwrap_or(1);
                     tell(
-                        revision.as_deref(),
+                        after.as_deref(),
                         PullEvent::PullFailed {
                             error,
                             consecutive_failures,
@@ -201,16 +214,25 @@ async fn run(
     project: &GitProject,
     projects_dir: &Path,
     list_commits: bool,
-) -> Result<Option<Moved>, String> {
+) -> Pulled {
+    let dir = projects_dir.join(project_id);
     let credentials = match &project.credential {
-        Some(credential_id) => secrets
-            .resolve(credential_id)
-            .await
-            .map_err(|e| format!("credential '{}': {}", credential_id, e.message))?,
+        Some(credential_id) => match secrets.resolve(credential_id).await {
+            Ok(credentials) => credentials,
+            Err(e) => {
+                // Nothing was pulled, so there is no move of ours to pin
+                // down: read without waiting for the lock.
+                let at = git.revision(&dir).await;
+                return Pulled {
+                    result: Err(format!("credential '{}': {}", credential_id, e.message)),
+                    before: at.clone(),
+                    after: at,
+                };
+            }
+        },
         None => Default::default(),
     };
 
-    let dir = projects_dir.join(project_id);
     // Held through the venv step too: it reads the checkout's
     // requirements.txt.
     let lock = checkout_lock(&dir);
@@ -224,11 +246,7 @@ async fn run(
     } else {
         "clone"
     };
-    // A clone has nothing to compare with: only a pull can bring commits.
-    let before = match operation {
-        "pull" => git.revision(&dir).await,
-        _ => None,
-    };
+    let before = git.revision(&dir).await;
     let started = std::time::Instant::now();
     let pulled = match tokio::time::timeout(
         std::time::Duration::from_secs(project.timeout_seconds),
@@ -243,46 +261,63 @@ async fn run(
         )),
     };
     count_git_request(project_id, operation, pulled.is_ok(), started);
-    pulled?;
-
+    // Read even when the pull failed, still under the lock: a fetch that
+    // died after its reset leaves the checkout somewhere else.
     let after = git.revision(&dir).await;
-    let moved = match (before, after) {
-        (Some(from), Some(to)) if from != to => {
-            let range = if list_commits {
-                commits(git, &credentials, project_id, project, &dir, &from, &to).await
-            } else {
-                None
-            };
-            Some(Moved { from, to, range })
-        }
-        _ => None,
-    };
 
-    if !project.python_venv {
-        return Ok(moved);
-    }
-
-    // Its own timeout budget rather than sharing git's: each step is bounded
-    // by the same number, and a slow clone must not eat the time a first
-    // `pip install` legitimately needs. Dropping on timeout kills the child
-    // (kill_on_drop in the adapter), same contract as git.
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(project.timeout_seconds),
-        venv.ensure(projects_dir, project_id),
-    )
-    .await
-    {
-        Ok(Ok(outcome)) => {
-            if outcome == VenvOutcome::Installed {
-                tracing::info!(project = %project_id, "Virtualenv updated");
+    // The rest runs under the same lock; an async block so that `?` ends it
+    // and the commits read above are still reported whatever it returns.
+    let result = async {
+        pulled?;
+        // A clone has nothing to compare with: only a pull can bring commits.
+        let moved = match (operation, before.as_deref(), after.as_deref()) {
+            ("pull", Some(from), Some(to)) if from != to => {
+                let range = if list_commits {
+                    commits(git, &credentials, project_id, project, &dir, from, to).await
+                } else {
+                    None
+                };
+                Some(Moved {
+                    from: from.to_string(),
+                    to: to.to_string(),
+                    range,
+                })
             }
-            Ok(moved)
+            _ => None,
+        };
+
+        if !project.python_venv {
+            return Ok(moved);
         }
-        Ok(Err(e)) => Err(format!("venv: {}", e.message)),
-        Err(_elapsed) => Err(format!(
-            "venv install timed out after {}s",
-            project.timeout_seconds
-        )),
+
+        // Its own timeout budget rather than sharing git's: each step is bounded
+        // by the same number, and a slow clone must not eat the time a first
+        // `pip install` legitimately needs. Dropping on timeout kills the child
+        // (kill_on_drop in the adapter), same contract as git.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(project.timeout_seconds),
+            venv.ensure(projects_dir, project_id),
+        )
+        .await
+        {
+            Ok(Ok(outcome)) => {
+                if outcome == VenvOutcome::Installed {
+                    tracing::info!(project = %project_id, "Virtualenv updated");
+                }
+                Ok(moved)
+            }
+            Ok(Err(e)) => Err(format!("venv: {}", e.message)),
+            Err(_elapsed) => Err(format!(
+                "venv install timed out after {}s",
+                project.timeout_seconds
+            )),
+        }
+    }
+    .await;
+    Pulled {
+        result,
+        before,
+        after,
     }
 }
 
@@ -476,63 +511,6 @@ mod tests {
 
     // The unreachable remote used to hang this future forever — and boot, the
     // scheduler task or the HTTP request along with it.
-    // A checkout whose commit moves on each pull: "aaa" before, "bbb" after.
-    struct MovingGit {
-        at: std::sync::Mutex<&'static str>,
-    }
-
-    impl GitPort for MovingGit {
-        fn ensure(
-            &self,
-            _dir: &Path,
-            _project: &GitProject,
-            _credentials: &HashMap<String, String>,
-        ) -> GitFuture<'_> {
-            *self.at.lock().unwrap() = "bbb";
-            Box::pin(async { Ok(()) })
-        }
-
-        fn revision(&self, _dir: &Path) -> crate::ports::git::RevisionFuture<'_> {
-            let at = self.at.lock().unwrap().to_string();
-            Box::pin(async move { Some(at) })
-        }
-    }
-
-    // Each pull is a row in the project's history: why and by whom, and the
-    // commit it moved the checkout from and to.
-    #[tokio::test]
-    async fn a_pull_is_kept_in_the_history_with_its_commits() {
-        let health = SyncHealthRegistry::new();
-        let git = MovingGit {
-            at: std::sync::Mutex::new("aaa"),
-        };
-        sync_project(
-            &git,
-            &MockSecrets::new(),
-            &StubVenv::default(),
-            &health,
-            "prj-a",
-            &project(),
-            &std::path::PathBuf::from("unused"),
-            None,
-            RunOrigin {
-                trigger: RunTrigger::Manual,
-                by: Some("key-ops".into()),
-            },
-        )
-        .await
-        .expect("the stub succeeds");
-
-        let history = health.history("prj-a");
-        assert_eq!(history.len(), 1);
-        let run = &history[0];
-        assert_eq!(run.trigger, RunTrigger::Manual);
-        assert_eq!(run.by.as_deref(), Some("key-ops"));
-        assert_eq!(run.revision_before.as_deref(), Some("aaa"));
-        assert_eq!(run.revision.as_deref(), Some("bbb"));
-        assert_eq!(run.error, None);
-    }
-
     #[tokio::test(start_paused = true)]
     async fn a_hung_git_remote_times_out_and_records_the_failure() {
         let secrets = MockSecrets::new();
@@ -679,6 +657,211 @@ mod tests {
         );
         drop(reading);
         pull.await.expect("the pull goes on once the read is over");
+    }
+
+    // A checkout whose commit moves on each pull: "aaa" before, "bbb" after.
+    struct MovingGit {
+        at: std::sync::Mutex<&'static str>,
+    }
+
+    impl GitPort for MovingGit {
+        fn ensure(
+            &self,
+            _dir: &Path,
+            _project: &GitProject,
+            _credentials: &HashMap<String, String>,
+        ) -> GitFuture<'_> {
+            *self.at.lock().unwrap() = "bbb";
+            Box::pin(async { Ok(()) })
+        }
+
+        fn revision(&self, _dir: &Path) -> crate::ports::git::RevisionFuture<'_> {
+            let at = self.at.lock().unwrap().to_string();
+            Box::pin(async move { Some(at) })
+        }
+    }
+
+    // Each pull is a row in the project's history: why and by whom, and the
+    // commit it moved the checkout from and to.
+    #[tokio::test]
+    async fn a_pull_is_kept_in_the_history_with_its_commits() {
+        let health = SyncHealthRegistry::new();
+        let git = MovingGit {
+            at: std::sync::Mutex::new("aaa"),
+        };
+        sync_project(
+            &git,
+            &MockSecrets::new(),
+            &StubVenv::default(),
+            &health,
+            "prj-a",
+            &project(),
+            &std::path::PathBuf::from("unused"),
+            None,
+            RunOrigin {
+                trigger: RunTrigger::Manual,
+                by: Some("key-ops".into()),
+            },
+        )
+        .await
+        .expect("the stub succeeds");
+
+        let history = health.history("prj-a");
+        assert_eq!(history.len(), 1);
+        let run = &history[0];
+        assert_eq!(run.trigger, RunTrigger::Manual);
+        assert_eq!(run.by.as_deref(), Some("key-ops"));
+        assert_eq!(run.revision_before.as_deref(), Some("aaa"));
+        assert_eq!(run.revision.as_deref(), Some("bbb"));
+        assert_eq!(run.error, None);
+    }
+
+    // A checkout whose commits move one per pull, slowly: "c0", then "c1"
+    // once the first pull is done, "c2" after the second.
+    #[derive(Default)]
+    struct SlowMovingGit {
+        pulls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl GitPort for SlowMovingGit {
+        fn ensure(
+            &self,
+            _dir: &Path,
+            _project: &GitProject,
+            _credentials: &HashMap<String, String>,
+        ) -> GitFuture<'_> {
+            Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                self.pulls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+        }
+
+        fn revision(&self, _dir: &Path) -> crate::ports::git::RevisionFuture<'_> {
+            let at = self.pulls.load(std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Some(format!("c{at}")) })
+        }
+    }
+
+    // Two pulls at once: the second waits for the first, and each row says
+    // only what that pull did. Read outside the lock, both saw "c0" before
+    // and the first could record the second's move as its own.
+    #[tokio::test]
+    async fn overlapping_pulls_each_record_only_their_own_move() {
+        let health = SyncHealthRegistry::new();
+        let git = SlowMovingGit::default();
+        let secrets = MockSecrets::new();
+        let venv = StubVenv::default();
+        let dir = tempfile::tempdir().unwrap();
+        let project = project();
+
+        let pull = || {
+            sync_project(
+                &git,
+                &secrets,
+                &venv,
+                &health,
+                "prj-a",
+                &project,
+                dir.path(),
+                None,
+                RunOrigin::of(RunTrigger::Scheduled),
+            )
+        };
+        let (first, second) = tokio::join!(pull(), pull());
+        first.expect("the stub succeeds");
+        second.expect("the stub succeeds");
+
+        let mut moves: Vec<_> = health
+            .history("prj-a")
+            .into_iter()
+            .map(|run| (run.revision_before, run.revision))
+            .collect();
+        moves.sort();
+        assert_eq!(
+            moves,
+            vec![
+                (Some("c0".to_string()), Some("c1".to_string())),
+                (Some("c1".to_string()), Some("c2".to_string())),
+            ]
+        );
+    }
+
+    // The pull before every application check would fill the history on its
+    // own: one is kept only when it moved the commit or failed. Its health is
+    // recorded either way.
+    #[tokio::test]
+    async fn a_check_pull_is_kept_only_when_it_moved_or_failed() {
+        let health = SyncHealthRegistry::new();
+        let secrets = MockSecrets::new();
+        let venv = StubVenv::default();
+        let dir = std::path::PathBuf::from("unused");
+        let check = RunOrigin::of(RunTrigger::Check);
+
+        // Nothing new: the health says it worked, the history stays empty.
+        sync_project(
+            &StubGit { fail_with: None },
+            &secrets,
+            &venv,
+            &health,
+            "prj-check",
+            &project(),
+            &dir,
+            None,
+            check.clone(),
+        )
+        .await
+        .expect("the stub succeeds");
+        assert!(
+            health
+                .get("prj-check")
+                .is_some_and(|h| h.last_success_age_seconds.is_some())
+        );
+        assert!(health.history("prj-check").is_empty());
+
+        // A failure is kept.
+        sync_project(
+            &StubGit {
+                fail_with: Some("remote unreachable".to_string()),
+            },
+            &secrets,
+            &venv,
+            &health,
+            "prj-check",
+            &project(),
+            &dir,
+            None,
+            check.clone(),
+        )
+        .await
+        .expect_err("the stub fails");
+        assert_eq!(health.history("prj-check").len(), 1);
+
+        // So is a move, with who asked for the check.
+        sync_project(
+            &MovingGit {
+                at: std::sync::Mutex::new("aaa"),
+            },
+            &secrets,
+            &venv,
+            &health,
+            "prj-check",
+            &project(),
+            &dir,
+            None,
+            RunOrigin {
+                trigger: RunTrigger::Check,
+                by: Some("key-ops".into()),
+            },
+        )
+        .await
+        .expect("the stub succeeds");
+        let history = health.history("prj-check");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].trigger, RunTrigger::Check);
+        assert_eq!(history[0].by.as_deref(), Some("key-ops"));
+        assert_eq!(history[0].revision.as_deref(), Some("bbb"));
+        assert_eq!(history[1].error.as_deref(), Some("remote unreachable"));
     }
 
     #[tokio::test]

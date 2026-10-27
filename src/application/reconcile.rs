@@ -59,12 +59,16 @@ pub struct Reconciler<'a> {
 // A failed pull is recorded on the project (its sync_health) and the run goes
 // on against the checkout already on disk: the systems drift whether or not
 // git answers, and the run's revision says which commit it actually read.
+//
+// `by` is who asked for a manual run (None for the schedule): the pull is a
+// `check` in the project's history, and a recorded one says who caused it.
 pub async fn pull_and_reconcile(
     r: &Reconciler<'_>,
     catalog: &Catalog<'_>,
     app_id: &str,
     mode: RunMode,
     trigger: Trigger,
+    by: Option<String>,
 ) -> Result<RunRecord, String> {
     if let Some(app) = catalog.applications.get(app_id)
         && let Some(project) = catalog.projects.get(&app.project)
@@ -80,9 +84,10 @@ pub async fn pull_and_reconcile(
                 dispatcher: r.dispatcher,
                 catalog,
             }),
-            crate::application::projects::RunOrigin::of(
-                crate::domain::sync_health::RunTrigger::Check,
-            ),
+            crate::application::projects::RunOrigin {
+                trigger: crate::domain::sync_health::RunTrigger::Check,
+                by,
+            },
         )
         .await
     {
