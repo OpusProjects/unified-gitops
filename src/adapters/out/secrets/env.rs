@@ -26,8 +26,12 @@ impl SecretsPort for EnvSecrets {
 
             let mut secrets = HashMap::new();
 
-            // Resolves secret_keys from env vars or JSON file
-            if !credential.secret_keys.is_empty() {
+            // env_vars first (full variable names), then secret_keys from
+            // the deprecated env_prefix or a JSON file — the order
+            // Credential::backend reports.
+            if !credential.env_vars.is_empty() {
+                secrets.extend(resolve_from_env_vars(&credential.env_vars)?);
+            } else if !credential.secret_keys.is_empty() {
                 let resolved = if let Some(ref prefix) = credential.env_prefix {
                     resolve_from_env(prefix, &credential.secret_keys)
                 } else if let Some(ref path) = credential.secret_file {
@@ -35,7 +39,7 @@ impl SecretsPort for EnvSecrets {
                 } else {
                     Err(SecretsError {
                         message: format!(
-                            "Credential '{}' has secret_keys but no env_prefix or secret_file",
+                            "Credential '{}' has secret_keys but no secret_file (or env_prefix)",
                             credential_id
                         ),
                     })
@@ -52,7 +56,7 @@ impl SecretsPort for EnvSecrets {
             if secrets.is_empty() {
                 return Err(SecretsError {
                     message: format!(
-                        "Credential '{}' has no secret_keys or file_keys",
+                        "Credential '{}' has no env_vars, secret_keys or file_keys",
                         credential_id
                     ),
                 });
@@ -63,7 +67,24 @@ impl SecretsPort for EnvSecrets {
     }
 }
 
-// Reads PREFIX_FIELD from env vars
+// Reads each variable env_vars names, delivered under its field
+// e.g. env_vars={"password": "LDAP_PASSWORD"} → reads LDAP_PASSWORD as `password`
+fn resolve_from_env_vars(
+    env_vars: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, SecretsError> {
+    let mut secrets = HashMap::new();
+
+    for (our_key, env_var) in env_vars {
+        let value = std::env::var(env_var).map_err(|_| SecretsError {
+            message: format!("Env var '{}' not set", env_var),
+        })?;
+        secrets.insert(our_key.clone(), value);
+    }
+
+    Ok(secrets)
+}
+
+// DEPRECATED form (env_prefix): reads PREFIX_FIELD from env vars
 // e.g. prefix="SECTION9", secret_keys={"username": "USERNAME"}
 //   → reads env var SECTION9_USERNAME
 fn resolve_from_env(
@@ -125,7 +146,44 @@ mod tests {
     use crate::domain::credential::CredentialType;
 
     #[tokio::test]
-    async fn resolve_from_env_vars() {
+    async fn resolve_from_full_env_var_names() {
+        unsafe {
+            std::env::set_var("TEST_ENV_VARS_LDAP_PASSWORD", "s3cret");
+        }
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "cred-ldap".to_string(),
+            Credential {
+                vault_path: None,
+                description: None,
+                credential_type: CredentialType::Token,
+                env_vars: [(
+                    "password".to_string(),
+                    "TEST_ENV_VARS_LDAP_PASSWORD".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+                env_prefix: None,
+                secret_file: None,
+                secret_keys: HashMap::new(),
+                file_keys: HashMap::new(),
+            },
+        );
+
+        let result = EnvSecrets::new(credentials)
+            .resolve("cred-ldap")
+            .await
+            .unwrap();
+        assert_eq!(result["password"], "s3cret");
+
+        unsafe {
+            std::env::remove_var("TEST_ENV_VARS_LDAP_PASSWORD");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_from_deprecated_env_prefix() {
         unsafe {
             std::env::set_var("TEST_CRED_USERNAME", "admin");
             std::env::set_var("TEST_CRED_PASSWORD", "secret123");
@@ -139,6 +197,7 @@ mod tests {
                 description: Some("Test".to_string()),
                 credential_type: CredentialType::UsernamePassword,
                 env_prefix: Some("TEST_CRED".to_string()),
+                env_vars: HashMap::new(),
                 secret_file: None,
                 secret_keys: [
                     ("username".to_string(), "USERNAME".to_string()),
@@ -176,6 +235,7 @@ mod tests {
                 description: Some("DB".to_string()),
                 credential_type: CredentialType::UsernamePassword,
                 env_prefix: None,
+                env_vars: HashMap::new(),
                 secret_file: Some(secret_path.to_str().unwrap().to_string()),
                 secret_keys: [
                     ("username".to_string(), "USER".to_string()),
@@ -255,6 +315,7 @@ mod tests {
                 description: Some("DB".to_string()),
                 credential_type: CredentialType::UsernamePassword,
                 env_prefix: None,
+                env_vars: HashMap::new(),
                 secret_file: Some(path.to_string()),
                 secret_keys: [
                     ("username".to_string(), "USER".to_string()),
@@ -279,6 +340,7 @@ mod tests {
                 description: Some("SSH".to_string()),
                 credential_type: CredentialType::SshKey,
                 env_prefix: Some("SSH_TEST".to_string()),
+                env_vars: HashMap::new(),
                 secret_file: None,
                 secret_keys: HashMap::new(),
                 file_keys: [("ssh_key".to_string(), "/run/secrets/id_rsa".to_string())]
@@ -307,6 +369,7 @@ mod tests {
                 description: Some("Mixed".to_string()),
                 credential_type: CredentialType::SshKey,
                 env_prefix: Some("MIX_TEST".to_string()),
+                env_vars: HashMap::new(),
                 secret_file: None,
                 secret_keys: [("username".to_string(), "USERNAME".to_string())]
                     .into_iter()
@@ -343,6 +406,7 @@ mod tests {
                 description: Some("Cert Only".to_string()),
                 credential_type: CredentialType::SshKey,
                 env_prefix: None,
+                env_vars: HashMap::new(),
                 secret_file: None,
                 secret_keys: HashMap::new(),
                 file_keys: [(
@@ -371,6 +435,7 @@ mod tests {
                 description: Some("Empty".to_string()),
                 credential_type: CredentialType::Token,
                 env_prefix: None,
+                env_vars: HashMap::new(),
                 secret_file: None,
                 secret_keys: HashMap::new(),
                 file_keys: HashMap::new(),

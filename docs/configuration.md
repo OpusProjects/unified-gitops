@@ -152,7 +152,9 @@ credentials:
   - name: cred-isilon
     description: "Isilon API user"
     type: username_password            # username_password | token | ssh_key
-    env_prefix: "ISILON"               # ISILON_USERNAME, ISILON_PASSWORD
+    env_vars:                          # field → the env var holding it
+      username: ISILON_USERNAME
+      password: ISILON_PASSWORD
     # vault_path: "ops/isilon-prod"    # or Vault (secrets.vault in config.yaml)
     # secret_file: "/run/secrets/isilon.json"
 ```
@@ -164,10 +166,14 @@ An API key names the env var holding its secret, and is `admin` or restricted to
 api_keys:
   - name: key-pipeline                 # shown in the audit log and on the Users page
     description: "Deploy pipeline"
-    env: "GITOPS_PIPELINE_KEY"
+    env_vars:
+      key: GITOPS_PIPELINE_KEY         # the env var holding the secret; `key` is the only field
     role: restricted                   # default restricted; admin = everything
     applications: [isilon-prod]        # may see, refresh and sync these only
 ```
+
+The older `env_prefix` + `secret_keys` (credentials) and `env: VAR` (API keys) still load, with a
+notice at startup and from `--check-config` naming the `env_vars` to write; a later release refuses them.
 
 `UNIFIED_GITOPS_KEY`, if set, is one more admin key. With no keys at all the API is open, which is
 logged loudly at startup.

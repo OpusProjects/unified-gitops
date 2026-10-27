@@ -24,7 +24,7 @@ all-or-nothing.
 
 | Backend | Declared by | Delivery |
 |---|---|---|
-| Environment variables | `env_prefix` + `secret_keys` | `SECTION9_USERNAME` etc., injected by the platform (k8s Secret via `envFrom`, `.env`, ESO) |
+| Environment variables | `env_vars` (field → variable) | `SECTION9_USERNAME` etc., injected by the platform (k8s Secret via `envFrom`, `.env`, ESO) |
 | JSON file | `secret_file` + `secret_keys` | A mounted file of values, re-read per resolution |
 | Vault (KV v2) | `vault_path` (+ the `secrets.vault:` block) | Read over HTTPS at resolution time |
 
@@ -41,24 +41,40 @@ is worse than an error.
 
 1. `vault_path` set → the value comes from Vault (env/file settings on the
    same credential are not consulted).
-2. Otherwise `env_prefix` → environment variables, or `secret_file` → the
-   JSON file.
+2. Otherwise `env_vars` → environment variables, then the deprecated
+   `env_prefix`, then `secret_file` → the JSON file.
 3. `file_keys` entries are appended as `<key>_path` values in every case.
 
-`secret_keys` maps our names to the backend's names — env-var suffixes, JSON
-fields, or Vault secret fields, one mapping syntax for all three.
+`env_vars` maps our names to full variable names: `{password: LDAP_PASSWORD}`
+reads `LDAP_PASSWORD` and delivers `password`. `secret_keys` maps our names to
+fields of a Vault secret or of the JSON file.
+
+Setting both `env_vars` and `env_prefix` is refused at load, and so is
+`secret_keys` next to `env_vars` without a `vault_path` or `secret_file`.
+
+The older form, `env_prefix` + `secret_keys` (prefix joined to each value with
+`_`), still loads but is deprecated: startup and `--check-config` name the
+`env_vars` to write in its place, and a later release refuses it.
 
 ---
 
 ## What scripts receive
 
-A connector sees only the credentials its application declares, each field as
-`CREDENTIAL_<KEY>` — and nothing else: the child environment is scrubbed, so
-no script can read the API keys or another application's values.
+A connector sees only the credentials its application declares, and nothing
+else: the child environment is scrubbed, so no script can read the API keys or
+another application's values. Each field arrives twice:
 
-`{"username": "USERNAME"}` under `env_prefix: "D42"` reads `D42_USERNAME` and
-delivers `CREDENTIAL_USERNAME`; a `file_keys` entry `ssh_key: /run/secrets/id_rsa`
-delivers `CREDENTIAL_SSH_KEY_PATH`. Git checkouts consume the same shapes
+- `CREDENTIAL_<ID>_<FIELD>`, always. `<ID>` is the credential's name without a
+  leading `cred-`/`cred_`, anything outside `a-z0-9` made `_`: the `password`
+  of `cred-portainer-ldap` is `CREDENTIAL_PORTAINER_LDAP_PASSWORD`.
+- `CREDENTIAL_<FIELD>`, only when no other declared credential has that field.
+  Two credentials with a `password` deliver neither as `CREDENTIAL_PASSWORD`,
+  rather than one silently overwriting the other.
+
+`env_vars: {username: D42_USERNAME}` on `cred-d42` reads `D42_USERNAME` and
+delivers `CREDENTIAL_D42_USERNAME` (and `CREDENTIAL_USERNAME` when it is the
+only one); a `file_keys` entry `ssh_key: /run/secrets/id_rsa` delivers
+`CREDENTIAL_SSH_KEY_PATH`. Git checkouts consume the same shapes
 (`username`, `ssh_key_path`, `token`) and never put a secret on a command
 line. See [connectors](connectors.md) for the full script environment.
 
@@ -120,7 +136,8 @@ cached — the next attempt re-asks the backend.
 
 The keys consumers present to *this* API live in `api_keys` items, follow the
 same never-in-YAML principle (each definition names the env var holding its
-secret), and are documented with the [API](api.md#authentication).
+secret as `env_vars: {key: VAR}`; the older `env: VAR` is deprecated), and are
+documented with the [API](api.md#authentication).
 
 Their rotation is deliberately external: swap the env var's value and restart.
 How the env vars and files themselves get into the deployment — plain Secret,

@@ -20,7 +20,8 @@ pub struct Application {
     pub connector: String,
 
     // Resolved per run through the secrets chain and handed to the script as
-    // CREDENTIAL_<FIELD>, exactly as unified-api hands them to connectors.
+    // CREDENTIAL_<ID>_<FIELD> (and CREDENTIAL_<FIELD> when no other of them
+    // has the field), exactly as unified-api hands them to connectors.
     #[serde(default)]
     pub credentials: Vec<String>,
 

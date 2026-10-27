@@ -527,6 +527,7 @@ impl AppConfig {
         // Restricted API keys must reference existing applications — a typo'd
         // id would otherwise just deny access with no explanation.
         for (id, key) in &self.api_keys {
+            errors.extend(key.errors(id));
             if key.role == ApiKeyRole::Restricted {
                 for app_id in &key.applications {
                     if !self.applications.contains_key(app_id) {
@@ -565,6 +566,10 @@ impl AppConfig {
             }
         }
 
+        for (id, credential) in &self.credentials {
+            errors.extend(credential.errors(id));
+        }
+
         // A vault_path needs a Vault to read it from.
         if self.secrets_config.vault.is_none() {
             for (id, credential) in &self.credentials {
@@ -599,6 +604,22 @@ impl AppConfig {
         }
 
         errors
+    }
+
+    // Forms that still load but are on their way out, one notice per item,
+    // sorted: credentials in the env_prefix + secret_keys form and API keys
+    // with a bare `env`. Reported at startup and by --check-config, never
+    // refused — a configuration repository moves to the new forms after the
+    // release that introduced them ships, not in the same deploy.
+    pub fn deprecations(&self) -> Vec<String> {
+        let mut notices: Vec<String> = self
+            .credentials
+            .iter()
+            .filter_map(|(id, c)| c.deprecation(id))
+            .chain(self.api_keys.iter().filter_map(|(id, k)| k.deprecation(id)))
+            .collect();
+        notices.sort();
+        notices
     }
 
     // Everything about `server.ui.ldap` that can be known without contacting
@@ -1177,6 +1198,49 @@ mod tests {
         let err = load_err(&dir);
         assert!(
             err.contains("app.yaml: application 'a'") && err.contains("credential_ids"),
+            "{err}"
+        );
+    }
+
+    // The old forms load (repositories move after the release ships) and
+    // are reported; mixing an old and a new form in one item is refused.
+    #[test]
+    fn deprecated_env_forms_load_with_notices_and_mixed_forms_are_refused() {
+        let dir = dir_with(&[
+            (
+                "credentials.yaml",
+                "credentials:\n  - name: cred-old\n    type: token\n    env_prefix: OLD\n    secret_keys:\n      token: TOKEN\n  - name: cred-new\n    type: token\n    env_vars:\n      token: NEW_TOKEN\n",
+            ),
+            (
+                "api_keys.yaml",
+                "api_keys:\n  - name: key-old\n    env: OLD_KEY\n    role: admin\n  - name: key-new\n    env_vars:\n      key: NEW_KEY\n    role: admin\n",
+            ),
+        ]);
+        let cfg = load_config(dir.path().to_str().unwrap()).expect("deprecated forms still load");
+        assert_eq!(
+            cfg.deprecations(),
+            vec![
+                "API key 'key-old': env is deprecated and will be refused in a later release; \
+                 write env_vars: {key: OLD_KEY}",
+                "credential 'cred-old': env_prefix + secret_keys is deprecated and will be refused \
+                 in a later release; write env_vars: {token: OLD_TOKEN}",
+            ]
+        );
+
+        let dir = dir_with(&[
+            (
+                "credentials.yaml",
+                "credentials:\n  - name: cred-mixed\n    type: token\n    env_prefix: M\n    env_vars:\n      token: M_TOKEN\n",
+            ),
+            (
+                "api_keys.yaml",
+                "api_keys:\n  - name: key-mixed\n    env: A\n    env_vars:\n      key: B\n",
+            ),
+        ]);
+        let err = load_err(&dir);
+        assert!(
+            err.contains("Credential 'cred-mixed' sets both env_vars and env_prefix")
+                && err.contains("API key 'key-mixed' sets both env_vars.key and env"),
             "{err}"
         );
     }

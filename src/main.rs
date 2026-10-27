@@ -14,6 +14,11 @@ async fn main() {
         let config_dir = std::env::var("CONFIG_DIR").unwrap_or_else(|_| "config".to_string());
         match unified_gitops::config::load_config(&config_dir) {
             Ok(cfg) => {
+                // Deprecated forms pass (they still load), but a config
+                // repository's CI is where they are worth reading.
+                for notice in cfg.deprecations() {
+                    println!("deprecated: {notice}");
+                }
                 println!(
                     "configuration OK ({}): {} applications, {} connectors, \
                      {} credentials, {} projects, {} webhooks",
@@ -51,6 +56,12 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // Forms that still load but will be refused by a later release, named
+    // with what to write instead.
+    for notice in cfg.deprecations() {
+        warn!("{notice}");
+    }
 
     // What this process is about to be BUILT with, recorded before the
     // configuration is consumed. A later reload diffs against it to name the
