@@ -4,9 +4,12 @@ use std::sync::{Arc, OnceLock};
 use dashmap::DashMap;
 use tokio::sync::RwLock;
 
+use crate::application::reconcile::Catalog;
+use crate::application::webhooks::{Dispatcher, PullEvent, PullOutcome, after_pull};
 use crate::domain::project::GitProject;
 use crate::domain::sync_health::SyncHealthRegistry;
-use crate::ports::git::GitPort;
+use crate::domain::webhook::Event;
+use crate::ports::git::{CommitRange, GitPort};
 use crate::ports::secrets::SecretsPort;
 use crate::ports::venv::{VenvOutcome, VenvPort};
 
@@ -48,6 +51,23 @@ pub fn checkout_lock(dir: &Path) -> Arc<RwLock<()>> {
         .clone()
 }
 
+// Where a pull tells what it did (application::webhooks): every caller that
+// has the configuration passes it. Without it (tests) a pull tells nothing.
+#[derive(Clone, Copy)]
+pub struct Announce<'a> {
+    pub dispatcher: &'a Dispatcher,
+    pub catalog: &'a Catalog<'a>,
+}
+
+// A pull that moved the checkout: from which commit, to which, and what came
+// in between (None when it was not asked for, or git could not say).
+struct Moved {
+    from: String,
+    to: String,
+    range: Option<CommitRange>,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn sync_project(
     git: &dyn GitPort,
     secrets: &dyn SecretsPort,
@@ -56,15 +76,88 @@ pub async fn sync_project(
     project_id: &str,
     project: &GitProject,
     projects_dir: &Path,
+    announce: Option<Announce<'_>>,
 ) -> Result<(), String> {
-    let result = run(git, secrets, venv, project_id, project, projects_dir).await;
+    // Listing commits can take a fetch: only when someone will read them.
+    let list_commits = announce.is_some_and(|a| {
+        a.catalog
+            .webhooks
+            .values()
+            .any(|w| w.wants_project(Event::CommitPulled, project_id))
+    });
+    let result = run(
+        git,
+        secrets,
+        venv,
+        project_id,
+        project,
+        projects_dir,
+        list_commits,
+    )
+    .await;
 
     match &result {
-        Ok(()) => health.record_success(project_id),
+        Ok(_) => health.record_success(project_id),
         Err(error) => health.record_failure(project_id, error),
     }
 
-    result
+    if let Some(announce) = announce {
+        let dir = projects_dir.join(project_id);
+        let tell = |revision: Option<&str>, event: PullEvent<'_>| {
+            after_pull(
+                announce.dispatcher,
+                announce.catalog.webhooks,
+                &PullOutcome {
+                    project: project_id,
+                    description: project.description.as_deref(),
+                    base_url: announce.catalog.url,
+                    revision,
+                    applications: announce.catalog.applications,
+                    event,
+                },
+            )
+        };
+        match &result {
+            Ok(moved) => {
+                if let Some(since) = announce.dispatcher.pulls.succeeded(project_id) {
+                    let revision = git.revision(&dir).await;
+                    tell(
+                        revision.as_deref(),
+                        PullEvent::PullRecovered {
+                            failing_seconds: crate::domain::run::now().saturating_sub(since),
+                        },
+                    );
+                }
+                if let Some(moved) = moved {
+                    tell(
+                        Some(&moved.to),
+                        PullEvent::CommitPulled {
+                            from: &moved.from,
+                            range: moved.range.as_ref(),
+                        },
+                    );
+                }
+            }
+            Err(error) => {
+                if announce.dispatcher.pulls.failed(project_id) {
+                    let revision = git.revision(&dir).await;
+                    let consecutive_failures = health
+                        .get(project_id)
+                        .map(|h| h.consecutive_failures)
+                        .unwrap_or(1);
+                    tell(
+                        revision.as_deref(),
+                        PullEvent::PullFailed {
+                            error,
+                            consecutive_failures,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    result.map(|_| ())
 }
 
 async fn run(
@@ -74,7 +167,8 @@ async fn run(
     project_id: &str,
     project: &GitProject,
     projects_dir: &Path,
-) -> Result<(), String> {
+    list_commits: bool,
+) -> Result<Option<Moved>, String> {
     let credentials = match &project.credential {
         Some(credential_id) => secrets
             .resolve(credential_id)
@@ -97,6 +191,11 @@ async fn run(
     } else {
         "clone"
     };
+    // A clone has nothing to compare with: only a pull can bring commits.
+    let before = match operation {
+        "pull" => git.revision(&dir).await,
+        _ => None,
+    };
     let started = std::time::Instant::now();
     let pulled = match tokio::time::timeout(
         std::time::Duration::from_secs(project.timeout_seconds),
@@ -113,8 +212,21 @@ async fn run(
     count_git_request(project_id, operation, pulled.is_ok(), started);
     pulled?;
 
+    let after = git.revision(&dir).await;
+    let moved = match (before, after) {
+        (Some(from), Some(to)) if from != to => {
+            let range = if list_commits {
+                commits(git, &credentials, project_id, project, &dir, &from, &to).await
+            } else {
+                None
+            };
+            Some(Moved { from, to, range })
+        }
+        _ => None,
+    };
+
     if !project.python_venv {
-        return Ok(());
+        return Ok(moved);
     }
 
     // Its own timeout budget rather than sharing git's: each step is bounded
@@ -131,13 +243,57 @@ async fn run(
             if outcome == VenvOutcome::Installed {
                 tracing::info!(project = %project_id, "Virtualenv updated");
             }
-            Ok(())
+            Ok(moved)
         }
         Ok(Err(e)) => Err(format!("venv: {}", e.message)),
         Err(_elapsed) => Err(format!(
             "venv install timed out after {}s",
             project.timeout_seconds
         )),
+    }
+}
+
+// What a pull brought in, for commit_pulled. Bounded by the project's
+// timeout like the pull itself; a failure costs the message its commit list,
+// never the pull.
+#[allow(clippy::too_many_arguments)]
+async fn commits(
+    git: &dyn GitPort,
+    credentials: &std::collections::HashMap<String, String>,
+    project_id: &str,
+    project: &GitProject,
+    dir: &Path,
+    from: &str,
+    to: &str,
+) -> Option<CommitRange> {
+    let started = std::time::Instant::now();
+    let listed = tokio::time::timeout(
+        std::time::Duration::from_secs(project.timeout_seconds),
+        git.commits(
+            dir,
+            project,
+            credentials,
+            from,
+            to,
+            crate::application::webhooks::MESSAGE_COMMITS,
+        ),
+    )
+    .await;
+    match listed {
+        Ok(Ok(range)) => {
+            if range.fetched {
+                count_git_request(project_id, "fetch", true, started);
+            }
+            Some(range)
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(project = %project_id, error = %e.message, "Could not list the commits pulled");
+            None
+        }
+        Err(_elapsed) => {
+            tracing::warn!(project = %project_id, "Listing the commits pulled timed out");
+            None
+        }
     }
 }
 
@@ -255,6 +411,7 @@ mod tests {
             "prj-a",
             &project(),
             &dir,
+            None,
         )
         .await
         .expect_err("the stub fails");
@@ -272,6 +429,7 @@ mod tests {
             "prj-a",
             &project(),
             &dir,
+            None,
         )
         .await
         .expect("the stub succeeds");
@@ -301,6 +459,7 @@ mod tests {
             "prj-a",
             &project,
             &std::path::PathBuf::from("unused"),
+            None,
         )
         .await
         .expect_err("the hung remote must time out");
@@ -335,6 +494,7 @@ mod tests {
             "prj-a",
             &project,
             &std::path::PathBuf::from("unused"),
+            None,
         )
         .await
         .expect_err("the credential does not resolve");
@@ -393,6 +553,7 @@ mod tests {
                 "prj-shared",
                 &project,
                 dir.path(),
+                None,
             )
         });
         for result in futures::future::join_all(pulls).await {
@@ -411,6 +572,7 @@ mod tests {
             "prj-shared",
             &project,
             dir.path(),
+            None,
         );
         tokio::pin!(pull);
         assert!(
@@ -437,6 +599,7 @@ mod tests {
             "prj-a",
             &project(),
             &std::path::PathBuf::from("unused"),
+            None,
         )
         .await
         .expect("git succeeds");
@@ -471,6 +634,7 @@ mod tests {
             "prj-a",
             &project,
             &std::path::PathBuf::from("unused"),
+            None,
         )
         .await
         .expect_err("the venv step fails");

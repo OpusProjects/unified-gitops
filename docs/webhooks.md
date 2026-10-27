@@ -1,10 +1,12 @@
 # Webhooks
 
-A webhook tells another system what happened to an application: drift found, a commit applied,
-a sync that failed. It is a configuration item like the others, under `webhooks:`. Every send
-goes out from this instance, so nothing has to reach in.
+A webhook tells another system what happened to an application (drift found, a commit applied,
+a sync that failed) or to a project's repository (new commits pulled, a pull that fails). It is a
+configuration item like the others, under `webhooks:`. Every send goes out from this instance, so
+nothing has to reach in.
 
 - [Events](#events)
+- [Applications and projects](#applications-and-projects)
 - [Types](#types)
 - [The message](#the-message)
 - [Ascender and AWX](#ascender-and-awx)
@@ -14,7 +16,8 @@ goes out from this instance, so nothing has to reach in.
 
 ## Events
 
-Each run produces at most one event, so one change never arrives twice under two names.
+Application events come from a run (a check or a sync) of one application. Each run produces at
+most one, so one change never arrives twice under two names.
 
 | Event | When | Fires |
 | --- | --- | --- |
@@ -34,6 +37,46 @@ Each run produces at most one event, so one change never arrives twice under two
   changes, so a restart does not report every pending difference again.
 - **While a rollback stands,** scheduled checks report only failures: they compare the system
   with git's HEAD on purpose, and what they find is the rollback. The next manual sync ends it.
+
+Project events come from a pull of a project's repository: by its own schedule, before an
+application's run, by `POST /api/v1/projects/{id}/sync`, or at startup. Each pull produces at most
+one of each.
+
+| Event | When | Fires |
+| --- | --- | --- |
+| `commit_pulled` | A pull brought new commits | Every pull that moves the checkout |
+| `pull_failed` | The repository could not be pulled: unreachable, refused, or timed out | When the project starts failing |
+| `pull_recovered` | Pulls work again after failing | When the project stops failing |
+
+- **A first clone is not a commit:** there is nothing to compare it with.
+- **One commit, two facts:** with `auto_sync`, a commit sends `commit_pulled` from the pull, then
+  `sync_succeeded` from each application it changed. The repository moved, then a system did;
+  `events` picks which to hear.
+- **While pulls fail,** applications keep running against the commit they have. `pull_failed`
+  is what says their repository stopped moving.
+
+## Applications and projects
+
+A webhook selects what it hears with `applications`, `projects`, or both; the two are combined.
+
+```yaml
+webhooks:
+  - name: wh-portainer
+    type: webhook
+    events: [commit_pulled, pull_failed, drift_detected, sync_failed]
+    projects: [prj-portainer-casc]       # the project's own events, and every application on it
+    applications: [vault-config]         # one more application, wherever it reads from
+    webhook:
+      url: "https://alerts.example.com/hooks/unified-gitops"
+```
+
+- **`projects`** is `all`, or projects by name. It hears the projects' own events, and the
+  application events of every application reading from them, including applications added later.
+- **`applications`** is `all`, or applications by name: their events only. It narrows a webhook to
+  some applications of a repository, when they belong to different teams or receivers.
+- **Project events need `projects`:** a webhook listing `commit_pulled`, `pull_failed` or
+  `pull_recovered` without naming a project fails the configuration, since it could never send.
+- **Neither, or both empty:** the webhook hears nothing; Send test still works.
 
 ## Types
 
@@ -60,9 +103,8 @@ webhooks:
       retries: 3
 ```
 
-- **`applications`** is `all` (every application, present and future), or the applications by name.
-  Left out or `[]`, it listens to none, as an API key or an LDAP rule with no applications reaches
-  none; Send test still works.
+- **`applications`** and **`projects`** are `all` (present and future), or names; see
+  [Applications and projects](#applications-and-projects). Left out or `[]`, they select nothing.
 
 | `auth` | What is sent | Credential field |
 | --- | --- | --- |
@@ -87,13 +129,14 @@ The `ascender` and `awx` types start a job template through its webhook; see
 
 ## The message
 
-The default body, and the fields a `body` template can use:
+The default body, and the fields a `body` template can use. An application event:
 
 ```json
 {
   "event": "drift_detected",
   "webhook": "wh-ascender-drift",
   "application": "portainer",
+  "project": "prj-portainer-casc",
   "description": "Portainer settings, environments and users",
   "status": "synced",
   "previous_status": "synced",
@@ -118,6 +161,42 @@ The default body, and the fields a `body` template can use:
   system reported them. Unlike `changes`, that is free text: a connector that prints a value in its
   error sends it on.
 - **`url`** links the application in the UI when `server.url` is set.
+
+A project event has the same envelope, with `application` null and `description` the project's:
+
+```json
+{
+  "event": "commit_pulled",
+  "webhook": "wh-portainer",
+  "application": null,
+  "project": "prj-portainer-casc",
+  "description": "Portainer configuration as code",
+  "revision": "8b1f0c2e4d6a8b0c1e3f5a7b9c1d3e5f7a9b1c3d",
+  "previous_revision": "39d6efb30883db193fcda905e0aa3def7b5d1f30",
+  "commits": [
+    {
+      "revision": "8b1f0c2e4d6a8b0c1e3f5a7b9c1d3e5f7a9b1c3d",
+      "author": "Jane Doe",
+      "message": "feat: add the ops team to Portainer",
+      "at": "2026-10-27T09:12:44Z"
+    }
+  ],
+  "more_commits": false,
+  "forced": false,
+  "applications": ["portainer"],
+  "at": "2026-10-27T09:13:02Z",
+  "url": "https://gitops.example.com/projects/prj-portainer-casc"
+}
+```
+
+- **`commits`**, newest first, at most 20, each with its author and the first line of its message.
+  `more_commits` is true when some were left out. Checkouts are shallow, so listing them may fetch
+  up to 20 commits of history; that happens only when a webhook wants `commit_pulled`.
+- **`forced`** is true when the history was rewritten (a force push) and the new one could be seen
+  whole. After a rewrite, only the new tip is listed, with `more_commits` true.
+- **`applications`**: those whose folder the commits changed. `null` when git could not compare.
+- **`pull_failed`** carries `errors` (the git error, one line) and `consecutive_failures`;
+  **`pull_recovered`** carries `failing_seconds`, how long pulls had been failing.
 
 ## Ascender and AWX
 
@@ -158,8 +237,8 @@ webhooks:
 - **Shutdown:** after the last runs finish, what they queued is still sent, within
   `server.shutdown_grace_seconds`; whatever is left then is dropped and logged.
 - **Redirects are not followed:** the body and its credential go only where the configuration says.
-- **What is kept:** each webhook's last 50 sends (event, application, result, status,
-  error), in memory: the last on `GET /api/v1/webhooks`, all of them on
+- **What is kept:** each webhook's last 50 sends (event, application or project, result,
+  status, error), in memory: the last on `GET /api/v1/webhooks`, all of them on
   `GET /api/v1/webhooks/{id}`. `POST /api/v1/webhooks/{id}/test` sends a test message
   now, once, and answers the outcome.
 - **Metrics:** `unified_gitops_webhooks_total{webhook,event,outcome}` (`success`,

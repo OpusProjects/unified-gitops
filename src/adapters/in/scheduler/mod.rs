@@ -1,12 +1,11 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
 use tracing::{debug, error, info};
 
 use crate::AppState;
-use crate::application::projects::sync_project;
+use crate::application::projects::{Announce, sync_project};
 use crate::application::reconcile::pull_and_reconcile;
 use crate::domain::project::GitProject;
 use crate::domain::run::{RunMode, RunResult, Trigger};
@@ -210,9 +209,13 @@ async fn scheduled_project_pull(
     project_id: &str,
     project: &GitProject,
     projects_dir: &std::path::Path,
+    // The configuration of the moment, for what the pull tells.
+    state: &AppState,
     consecutive_failures: &mut u32,
     skip: &mut u32,
 ) {
+    let config = state.config();
+    let catalog = config.catalog();
     match sync_project(
         git,
         secrets,
@@ -221,6 +224,10 @@ async fn scheduled_project_pull(
         project_id,
         project,
         projects_dir,
+        Some(Announce {
+            dispatcher: &state.dispatcher,
+            catalog: &catalog,
+        }),
     )
     .await
     {
@@ -325,15 +332,7 @@ fn start_project_tasks(
     if projects.is_empty() {
         return Vec::new();
     }
-    start_project_sync_tasks(
-        Arc::clone(&state.git),
-        Arc::clone(&state.secrets),
-        Arc::clone(&state.venv),
-        Arc::clone(&state.project_health),
-        projects,
-        state.projects_dir.clone(),
-        shutdown,
-    )
+    start_project_sync_tasks(state, projects, shutdown)
 }
 
 // One clone attempt per configured project that has no checkout on disk,
@@ -353,6 +352,8 @@ fn clone_missing_checkouts(state: Arc<AppState>) -> Vec<tokio::task::JoinHandle<
                 return;
             }
             info!(project = %project_id, "New project — cloning its checkout");
+            let config = state.config();
+            let catalog = config.catalog();
             match sync_project(
                 &*state.git,
                 &*state.secrets,
@@ -361,6 +362,10 @@ fn clone_missing_checkouts(state: Arc<AppState>) -> Vec<tokio::task::JoinHandle<
                 &project_id,
                 &project,
                 &state.projects_dir,
+                Some(Announce {
+                    dispatcher: &state.dispatcher,
+                    catalog: &catalog,
+                }),
             )
             .await
             {
@@ -428,20 +433,19 @@ pub fn start_application_tasks(
     handles
 }
 
-// Periodic re-pull of git project checkouts. Separate from start_sync_tasks
-// because it doesn't need AppState: main wires it with its own git/secrets
-// handles, before the HTTP router even exists.
+// Periodic re-pull of git project checkouts, one task per project with a
+// cadence. Each pull reads the configuration of the moment from the state,
+// for what it tells (application::webhooks).
 pub fn start_project_sync_tasks(
-    git: Arc<dyn GitPort>,
-    secrets: Arc<dyn SecretsPort>,
-    venv: Arc<dyn crate::ports::venv::VenvPort>,
-    // The same registry instance AppState exposes: main hands it in because
-    // these tasks start before the AppState exists
-    health: Arc<SyncHealthRegistry>,
+    state: Arc<AppState>,
     projects: HashMap<String, GitProject>,
-    projects_dir: PathBuf,
     shutdown: watch::Receiver<bool>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
+    let git = Arc::clone(&state.git);
+    let secrets = Arc::clone(&state.secrets);
+    let venv = Arc::clone(&state.venv);
+    let health = Arc::clone(&state.project_health);
+    let projects_dir = state.projects_dir.clone();
     let mut handles = Vec::new();
 
     for (project_id, project) in projects {
@@ -472,6 +476,7 @@ pub fn start_project_sync_tasks(
         let task_venv = Arc::clone(&venv);
         let task_health = Arc::clone(&health);
         let task_projects_dir = projects_dir.clone();
+        let task_state = Arc::clone(&state);
         let task_cadence = cadence;
         let task_shutdown = shutdown.clone();
 
@@ -484,6 +489,7 @@ pub fn start_project_sync_tasks(
                 let venv = Arc::clone(&task_venv);
                 let health = Arc::clone(&task_health);
                 let projects_dir = task_projects_dir.clone();
+                let state = Arc::clone(&task_state);
                 let project_id = project_id.clone();
                 let project = project.clone();
                 let cadence = task_cadence.clone();
@@ -524,6 +530,7 @@ pub fn start_project_sync_tasks(
                                     &project_id,
                                     &project,
                                     &projects_dir,
+                                    &state,
                                     &mut consecutive_failures,
                                     &mut skip,
                                 )
@@ -555,6 +562,7 @@ pub fn start_project_sync_tasks(
                                 &project_id,
                                 &project,
                                 &projects_dir,
+                                &state,
                                 &mut consecutive_failures,
                                 &mut skip,
                             )

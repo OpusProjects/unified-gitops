@@ -76,6 +76,10 @@ pub async fn pull_and_reconcile(
             &app.project,
             project,
             r.projects_dir,
+            Some(crate::application::projects::Announce {
+                dispatcher: r.dispatcher,
+                catalog,
+            }),
         )
         .await
     {
@@ -412,6 +416,7 @@ async fn reconcile_tree(
             catalog.webhooks,
             &crate::application::webhooks::RunOutcome {
                 application: app_id,
+                project: &app.project,
                 description: app.description.as_deref(),
                 base_url: catalog.url,
                 before: &before,

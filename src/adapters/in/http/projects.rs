@@ -175,6 +175,7 @@ pub async fn sync_project_now(
         .ok_or_else(|| ApiError::not_found(format!("project '{}' is not configured", id)))?;
 
     let start = Instant::now();
+    let catalog = config.catalog();
     let result = sync_project(
         &*state.git,
         &*state.secrets,
@@ -183,6 +184,10 @@ pub async fn sync_project_now(
         &id,
         project,
         &state.projects_dir,
+        Some(crate::application::projects::Announce {
+            dispatcher: &state.dispatcher,
+            catalog: &catalog,
+        }),
     )
     .await;
     let duration_ms = start.elapsed().as_millis();

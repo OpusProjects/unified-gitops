@@ -10,6 +10,8 @@ use crate::domain::project::GitProject;
 pub type GitFuture<'a> = Pin<Box<dyn Future<Output = Result<(), GitError>> + Send + 'a>>;
 pub type RevisionFuture<'a> = Pin<Box<dyn Future<Output = Option<String>> + Send + 'a>>;
 pub type ExportFuture<'a> = Pin<Box<dyn Future<Output = Result<String, GitError>> + Send + 'a>>;
+pub type CommitsFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<CommitRange, GitError>> + Send + 'a>>;
 
 // GitPort — keep a local checkout of a project's repository up to date.
 // The concrete implementation shells out to the git binary; the trait exists
@@ -43,6 +45,27 @@ pub trait GitPort: Send + Sync {
         Box::pin(async { None })
     }
 
+    // What a pull brought: the commits after `from` up to `to` (newest
+    // first, at most `max`), and the files that differ between the two.
+    // Checkouts are shallow, so the history in between may first have to be
+    // fetched: hence the project and its resolved credentials.
+    #[allow(clippy::too_many_arguments)]
+    fn commits<'a>(
+        &'a self,
+        _dir: &'a Path,
+        _project: &'a GitProject,
+        _credentials: &'a HashMap<String, String>,
+        _from: &'a str,
+        _to: &'a str,
+        _max: usize,
+    ) -> CommitsFuture<'a> {
+        Box::pin(async {
+            Err(GitError {
+                message: "this git adapter cannot list commits".to_string(),
+            })
+        })
+    }
+
     // Write `path` of the checkout in `dir` as it was at `revision` into
     // `dest`, without touching the checkout itself (its files, index and
     // HEAD stay where the pulls left them): what a rollback applies. Answers
@@ -65,6 +88,31 @@ pub trait GitPort: Send + Sync {
             })
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Commit {
+    pub revision: String,
+    pub author: String,
+    // The first line of its message.
+    pub message: String,
+    // Unix seconds, as committed.
+    pub at: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CommitRange {
+    pub commits: Vec<Commit>,
+    // Commits left out: more than `max`, or a history too deep to reach.
+    pub more: bool,
+    // `from` is not in the new history: it was rewritten (a force push).
+    // Only claimed when the whole history was there to look at.
+    pub forced: bool,
+    // The paths that differ between `from` and `to`; None when git could
+    // not compare them.
+    pub paths: Option<Vec<String>>,
+    // Whether finding them took a fetch (counted as a git request).
+    pub fetched: bool,
 }
 
 #[derive(Debug)]
