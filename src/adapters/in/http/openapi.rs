@@ -95,6 +95,7 @@ impl Modify for SecurityAddon {
         http::credentials::CredentialInfo,
         http::credentials::FileKeyInfo,
         http::credentials::CredentialUsersInfo,
+        http::credentials::VaultConnectionInfo,
         http::settings::Settings,
         http::settings::ServerSettings,
         http::settings::UiSettings,

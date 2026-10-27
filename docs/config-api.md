@@ -151,7 +151,7 @@ is already running.
 | `applications` | New applications start being checked, removed ones stop, changed ones restart on the new settings |
 | `connectors` | Used from the next run of every application |
 | `projects` | Pull tasks restart; a project that arrived with the reload is cloned in the background |
-| `credentials`, `secrets:` | The resolver chain is rebuilt (which also drops the resolution cache) |
+| `credentials`, `secrets:` | The resolver chain is rebuilt (which also drops each Vault's resolution cache) |
 | `api_keys` | In force on the next request |
 | `server.shutdown_grace_seconds` | The next shutdown — the drain reads whatever a reload set last |
 | `server.metrics_require_auth` | The next scrape — the `/metrics` handler checks the flag per request |

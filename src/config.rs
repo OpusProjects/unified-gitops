@@ -24,6 +24,13 @@ pub struct AppConfig {
     pub webhooks: HashMap<String, Webhook>,
 }
 
+fn vault_as_login(who: &str, credential_id: &str) -> String {
+    format!(
+        "{who} uses credential '{credential_id}', which is a Vault connection: name the \
+         credential that reads from it (its vault:) instead"
+    )
+}
+
 // HTTP server configuration — config.yaml
 //
 // `deny_unknown_fields`, here and on every other struct that parses a config
@@ -105,31 +112,23 @@ fn default_state_dir() -> String {
 }
 
 // Secrets behavior — config.yaml, `secrets:` section (optional)
-#[derive(Deserialize, Clone, PartialEq)]
+#[derive(Deserialize, Clone, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct SecretsConfig {
     // How long a resolved credential may be reused before the backend is asked
     // again. The TTL is also the rotation latency. 0 disables the cache.
-    #[serde(default = "default_credential_cache_ttl")]
-    pub cache_ttl_seconds: u64,
+    //
+    // DEPRECATED, like the whole block: a Vault is now a `type: vault`
+    // credential with its own cache_ttl_seconds, and env and file credentials
+    // are read fresh. Set here, it still wraps every credential in one cache,
+    // as before. Absent = no such cache.
+    #[serde(default)]
+    pub cache_ttl_seconds: Option<u64>,
 
     // Native Vault resolution (KV v2). Credentials that carry `vault_path`
     // read from this Vault; those without keep resolving from env/files.
     #[serde(default)]
     pub vault: Option<crate::adapters::out::secrets::vault::VaultConfig>,
-}
-
-impl Default for SecretsConfig {
-    fn default() -> Self {
-        Self {
-            cache_ttl_seconds: default_credential_cache_ttl(),
-            vault: None,
-        }
-    }
-}
-
-fn default_credential_cache_ttl() -> u64 {
-    60
 }
 
 // Where git projects are cloned — config.yaml, `projects:` section (optional)
@@ -483,11 +482,15 @@ impl AppConfig {
                     app.connector
                 ));
             }
+            // A Vault connection is read FROM, never handed to a script
+            // (its token would be).
             for cred in &app.credentials {
                 if !self.credentials.contains_key(cred) {
                     errors.push(format!(
                         "Application '{id}' references unknown credential '{cred}'"
                     ));
+                } else if self.is_vault(cred) {
+                    errors.push(vault_as_login(&format!("Application '{id}'"), cred));
                 }
             }
         }
@@ -515,12 +518,14 @@ impl AppConfig {
                     ));
                 }
             }
-            if let Some(ref cred_id) = project.credential
-                && !self.credentials.contains_key(cred_id)
-            {
-                errors.push(format!(
-                    "Project '{id}' references unknown credential '{cred_id}'"
-                ));
+            if let Some(ref cred_id) = project.credential {
+                if !self.credentials.contains_key(cred_id) {
+                    errors.push(format!(
+                        "Project '{id}' references unknown credential '{cred_id}'"
+                    ));
+                } else if self.is_vault(cred_id) {
+                    errors.push(vault_as_login(&format!("Project '{id}'"), cred_id));
+                }
             }
         }
 
@@ -562,6 +567,8 @@ impl AppConfig {
                     errors.push(format!(
                         "Webhook '{id}' references unknown credential '{cred}'"
                     ));
+                } else if self.is_vault(cred) {
+                    errors.push(vault_as_login(&format!("Webhook '{id}'"), cred));
                 }
             }
         }
@@ -570,15 +577,27 @@ impl AppConfig {
             errors.extend(credential.errors(id));
         }
 
-        // A vault_path needs a Vault to read it from.
-        if self.secrets_config.vault.is_none() {
-            for (id, credential) in &self.credentials {
-                if credential.vault_path.is_some() {
-                    errors.push(format!(
-                        "Credential '{id}' sets vault_path but config.yaml has no \
-                         secrets.vault block to resolve it against"
-                    ));
-                }
+        // A vault_path needs a Vault to read it from: the `type: vault`
+        // credential it names, or (deprecated) config.yaml's secrets.vault
+        // when it names none.
+        for (id, credential) in &self.credentials {
+            if credential.vault_path.is_none() {
+                continue;
+            }
+            match &credential.vault {
+                Some(vault) if !self.credentials.contains_key(vault) => errors.push(format!(
+                    "Credential '{id}' references unknown vault '{vault}'"
+                )),
+                Some(vault) if !self.is_vault(vault) => errors.push(format!(
+                    "Credential '{id}' names '{vault}' as its vault, which is not a \
+                     `type: vault` credential"
+                )),
+                Some(_) => {}
+                None if self.secrets_config.vault.is_none() => errors.push(format!(
+                    "Credential '{id}' sets vault_path but names no vault to read it from — \
+                     write vault: <a type: vault credential>"
+                )),
+                None => {}
             }
         }
 
@@ -607,19 +626,35 @@ impl AppConfig {
     }
 
     // Forms that still load but are on their way out, one notice per item,
-    // sorted: credentials in the env_prefix + secret_keys form and API keys
-    // with a bare `env`. Reported at startup and by --check-config, never
+    // sorted: credentials in the env_prefix + secret_keys form or with a
+    // vault_path and no `vault:`, API keys with a bare `env`, and config.yaml's
+    // secrets block. Reported at startup and by --check-config, never
     // refused — a configuration repository moves to the new forms after the
     // release that introduced them ships, not in the same deploy.
     pub fn deprecations(&self) -> Vec<String> {
+        let secrets = &self.secrets_config;
+        let block = (secrets.cache_ttl_seconds.is_some() || secrets.vault.is_some()).then(|| {
+            "config.yaml: the secrets block is deprecated and will be refused in a later \
+             release — declare a Vault as a `type: vault` credential (address, mount, \
+             env_vars: {token: <VAR>} or kubernetes_role, cache_ttl_seconds) and name it with \
+             vault: on the credentials that read from it; env and file credentials need no cache"
+                .to_string()
+        });
         let mut notices: Vec<String> = self
             .credentials
             .iter()
             .filter_map(|(id, c)| c.deprecation(id))
             .chain(self.api_keys.iter().filter_map(|(id, k)| k.deprecation(id)))
+            .chain(block)
             .collect();
         notices.sort();
         notices
+    }
+
+    fn is_vault(&self, credential_id: &str) -> bool {
+        self.credentials
+            .get(credential_id)
+            .is_some_and(|c| c.credential_type == crate::domain::credential::CredentialType::Vault)
     }
 
     // Everything about `server.ui.ldap` that can be known without contacting
@@ -665,6 +700,11 @@ impl AppConfig {
             errors.push(format!(
                 "server.ui.ldap.bind_credential references unknown credential '{}'",
                 ldap.bind_credential
+            ));
+        } else if self.is_vault(&ldap.bind_credential) {
+            errors.push(vault_as_login(
+                "server.ui.ldap.bind_credential",
+                &ldap.bind_credential,
             ));
         }
         if !ldap.user_filter.contains("{username}") {
@@ -1282,5 +1322,127 @@ mod tests {
         let a = RestartOnlySettings::from_config(&load_config(a.path().to_str().unwrap()).unwrap());
         let b = RestartOnlySettings::from_config(&load_config(b.path().to_str().unwrap()).unwrap());
         assert_eq!(a.changed_keys(&b), vec!["server.port", "state.dir"]);
+    }
+
+    // A vault_path needs a Vault: the one it names, or the deprecated
+    // config.yaml block.
+    #[test]
+    fn a_vault_path_without_a_vault_is_refused() {
+        let creds = (
+            "credentials.yaml",
+            "credentials:\n  - name: cred-v\n    type: token\n    vault_path: team/x\n",
+        );
+        let err = load_err(&dir_with(&[creds]));
+        assert!(
+            err.contains("names no vault to read it from"),
+            "error was: {err}"
+        );
+
+        // The deprecated config.yaml block still resolves it, with a notice
+        let dir = dir_with(&[
+            creds,
+            (
+                "config.yaml",
+                "server:\n  host: \"127.0.0.1\"\n  port: 9090\nsecrets:\n  vault:\n    address: \"http://vault.example:8200\"\n",
+            ),
+        ]);
+        let cfg = load_config(dir.path().to_str().unwrap()).expect("a configured Vault validates");
+        let notes = cfg.deprecations();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("credential 'cred-v': a vault_path without `vault:`"))
+        );
+    }
+
+    // A Vault is a credential: others name it with `vault:`, nothing hands it
+    // to a script, and config.yaml needs no secrets block.
+    #[test]
+    fn a_vault_credential_is_named_by_the_credentials_that_read_from_it() {
+        let dir = dir_with(&[(
+            "creds.yaml",
+            concat!(
+                "credentials:\n",
+                "  - name: cred-vault\n    type: vault\n    address: https://vault.example:8200\n",
+                "    env_vars:\n      token: VAULT_TOKEN\n    cache_ttl_seconds: 300\n",
+                "  - name: cred-isilon\n    type: username_password\n    vault: cred-vault\n",
+                "    vault_path: infra/isilon\n",
+            ),
+        )]);
+        let cfg = load_config(dir.path().to_str().unwrap()).expect("loads");
+        assert_eq!(cfg.credentials["cred-isilon"].backend(), "vault");
+        assert_eq!(cfg.credentials["cred-vault"].backend(), "vault");
+        assert!(cfg.deprecations().is_empty(), "{:?}", cfg.deprecations());
+    }
+
+    #[test]
+    fn a_vault_credential_misused_is_refused_naming_why() {
+        let dir = dir_with(&[
+            ("connectors/kv.yaml", CONNECTOR),
+            ("projects.yaml", PROJECT),
+            (
+                "applications/portainer.yaml",
+                "applications:\n  - name: portainer\n    connector: kv\n    project: prj-state\n    credentials: [cred-vault]\n",
+            ),
+            (
+                "webhooks/w.yaml",
+                "webhooks:\n  - name: w\n    type: ascender\n    events: [drift_detected]\n    applications: [portainer]\n    ascender:\n      url: https://ascender.example.com\n      job_template: 12\n      credentials: [cred-vault]\n",
+            ),
+            (
+                "creds.yaml",
+                concat!(
+                    "credentials:\n",
+                    // no address, no way to log in
+                    "  - name: cred-vault\n    type: vault\n",
+                    // a Vault with a login's fields and a jwt_path for no role
+                    "  - name: cred-vault2\n    type: vault\n    address: vault.example\n",
+                    "    env_vars:\n      token: T\n      username: U\n    jwt_path: /x\n",
+                    "    secret_file: /run/x.json\n",
+                    // names a credential that is not a Vault
+                    "  - name: cred-a\n    type: token\n    vault: cred-gh\n    vault_path: x\n",
+                    "  - name: cred-gh\n    type: token\n    env_vars:\n      token: GH\n",
+                    // names a Vault that does not exist
+                    "  - name: cred-b\n    type: token\n    vault: cred-nope\n    vault_path: x\n",
+                    // vault: with no vault_path
+                    "  - name: cred-c\n    type: token\n    vault: cred-vault\n",
+                    // a Vault's setting on a login
+                    "  - name: cred-odd\n    type: token\n    address: https://x\n    env_vars:\n      token: T\n",
+                ),
+            ),
+        ]);
+        let err = load_err(&dir);
+        for expected in [
+            "is a Vault but has no address",
+            "has no way to log in to Vault",
+            "address 'vault.example' must be an http:// or https:// address",
+            "env_vars.username is not a field of a Vault",
+            "is a Vault and sets secret_file",
+            "sets jwt_path without kubernetes_role",
+            "names 'cred-gh' as its vault, which is not a `type: vault` credential",
+            "Credential 'cred-b' references unknown vault 'cred-nope'",
+            "Credential 'cred-c' names vault 'cred-vault' but no vault_path",
+            "sets address, which only a `type: vault` credential uses",
+            "Application 'portainer' uses credential 'cred-vault', which is a Vault connection",
+            "Webhook 'w' uses credential 'cred-vault', which is a Vault connection",
+        ] {
+            assert!(err.contains(expected), "missing '{expected}' in: {err}");
+        }
+    }
+
+    #[test]
+    fn the_config_yaml_secrets_block_still_loads_and_says_what_to_write() {
+        let dir = dir_with(&[(
+            "config.yaml",
+            "server:\n  host: \"127.0.0.1\"\n  port: 9090\nsecrets:\n  cache_ttl_seconds: 30\n",
+        )]);
+        let cfg = load_config(dir.path().to_str().unwrap()).expect("loads");
+        assert_eq!(cfg.secrets_config.cache_ttl_seconds, Some(30));
+        let notes = cfg.deprecations();
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0].contains("the secrets block is deprecated"),
+            "{notes:?}"
+        );
     }
 }

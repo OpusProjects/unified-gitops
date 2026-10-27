@@ -68,10 +68,6 @@ state:
 projects:
   dir: "/var/lib/unified-gitops/projects"  # one checkout per project
 
-secrets:
-  cache_ttl_seconds: 60            # also the rotation latency
-  # vault: {...}                   # see secrets.md
-
 # config_api:
 #   enabled: true                  # read/write this directory over HTTP (admin only)
 ```
@@ -151,13 +147,51 @@ As in unified-api. A credential names env vars, a file or a Vault path, never a 
 credentials:
   - name: cred-isilon
     description: "Isilon API user"
-    type: username_password            # username_password | token | ssh_key
+    type: username_password            # username_password | token | ssh_key | vault
     env_vars:                          # field → the env var holding it
       username: ISILON_USERNAME
       password: ISILON_PASSWORD
-    # vault_path: "ops/isilon-prod"    # or Vault (secrets.vault in config.yaml)
+    # vault: cred-vault                # or Vault: the type: vault credential to read from
+    # vault_path: "ops/isilon-prod"    #   and the KV v2 path under its mount
     # secret_file: "/run/secrets/isilon.json"
 ```
+
+A Vault is a credential too, of `type: vault`, as AWX models a HashiCorp Vault lookup: the
+credentials that read from it name it with `vault:` and say where with `vault_path`. Several Vaults
+can coexist, each with its own login and cache.
+
+```yaml
+# credentials/cred-vault.yaml — the connection to a Vault
+credentials:
+  - name: cred-vault
+    description: Vault
+    type: vault
+    address: https://vault.example.com:8200
+    mount: secret                      # KV v2 mount (default "secret")
+    env_vars:
+      token: VAULT_TOKEN               # token auth: re-read per resolution
+    # kubernetes_role: unified-gitops  # OR Kubernetes auth (with an optional jwt_path)
+    timeout_seconds: 10                # bound on every request (default 10)
+    cache_ttl_seconds: 60              # how long a value read here is reused
+                                       # (default 60; 0 = every resolution)
+```
+
+| `type: vault` field | Notes |
+|---|---|
+| `address` | Required. `http://` or `https://` |
+| `mount` | The KV v2 mount `vault_path` values live under (default `secret`) |
+| `env_vars.token` / `kubernetes_role` | How to log in: exactly one. `jwt_path` goes with `kubernetes_role` |
+| `timeout_seconds` | Bound on every request (default 10) |
+| `cache_ttl_seconds` | How long a value read from this Vault is reused (default 60; `0` = every resolution): what keeps the check schedule from becoming a request storm, and also how long a rotation takes to show |
+
+Credentials *without* a `vault_path` keep resolving from env/files, uncached, so adoption is per
+credential. A Vault credential is never handed to an application, project, webhook or LDAP bind:
+naming one there is refused, since its token is not a login.
+
+The `secrets:` block in `config.yaml` (`cache_ttl_seconds`, and a single `vault:` with `token_env`)
+still loads but is **deprecated**: startup and `--check-config` say what to write instead, and a
+later release refuses it. While it is set, its `cache_ttl_seconds` still caches every credential, as
+it did, and a `vault_path` with no `vault:` reads from its `vault:`.
 
 An API key names the env var holding its secret, and is `admin` or restricted to applications:
 
