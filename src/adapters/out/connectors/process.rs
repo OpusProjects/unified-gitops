@@ -75,10 +75,12 @@ async fn run(
 
     let what = format!("{} {}", call.script_path, args.join(" "));
     let fut = async {
-        let mut child = cmd.spawn().map_err(|e| ConnectorError {
-            message: format!("could not run {what}: {e}"),
-            stderr: String::new(),
-        })?;
+        let mut child = process_env::spawn(&mut cmd)
+            .await
+            .map_err(|e| ConnectorError {
+                message: format!("could not run {what}: {e}"),
+                stderr: String::new(),
+            })?;
         let group = GroupKill(child.id());
         if let Some(input) = stdin
             && let Some(mut pipe) = child.stdin.take()

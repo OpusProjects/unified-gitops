@@ -23,6 +23,10 @@ project adheres to [Semantic Versioning](https://semver.org/).
 - A credential's `env_prefix` + `secret_keys` and an API key's `env: VAR` still load, with a notice at startup and from `--check-config` naming the `env_vars` to write in their place; a later release refuses them.
 - The `secrets:` block in `config.yaml` (`cache_ttl_seconds`, and `vault:` with `token_env`) still loads, with a notice saying to declare the Vault as a `type: vault` credential; while set, its cache still covers every credential and a `vault_path` with no `vault:` reads from it. A later release refuses it.
 
+### Fixed
+
+- Starting connector scripts retries briefly on "text file busy" (ETXTBSY) instead of failing the run: a script still open for writing elsewhere, such as one a project pull is rewriting, or a file another thread's child briefly held, now runs once the writer lets go.
+
 ## [0.3.0] - 2026-10-27
 
 ### Added
