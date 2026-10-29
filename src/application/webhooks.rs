@@ -359,10 +359,14 @@ impl<'a> Fields<'a> {
         if let Some(value) = self.values.get(name) {
             return Ok(Some(value));
         }
+        use crate::domain::credential::{delivery_id, variable_part};
         let mut holders: Vec<&String> = Vec::new();
         for id in self.credential_ids {
-            let under_id = format!("{}_{name}", crate::domain::credential::delivery_id(id));
-            if !holders.contains(&id) && self.values.contains_key(&under_id) {
+            // In variable form, as the merge compares them: a `Token` field
+            // is delivered as `<id>_Token` and shared with a `token` all the
+            // same.
+            let under_id = variable_part(&format!("{}_{name}", delivery_id(id)));
+            if !holders.contains(&id) && self.values.keys().any(|k| variable_part(k) == under_id) {
                 holders.push(id);
             }
         }

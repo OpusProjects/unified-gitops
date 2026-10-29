@@ -123,9 +123,12 @@ webhooks:
   credentials, which come from env vars or Vault.
 - **One header, one source:** a fixed header with the name the auth or the signature writes (say,
   `Authorization` with a bearer credential) fails the configuration.
-- **One field, one credential:** the fields above are read by their bare names, which a field two
-  of the webhook's credentials share is never delivered under. Two credentials naming the same
-  field fail the configuration; one only Vault or a file can reveal fails the send, naming it.
+- **One field, one credential:** the fields the auth and the signature read (`token`, or
+  `username` and `password`, and `secret_field`) are read by their bare names, which a field two
+  of the webhook's credentials share is never delivered under. Two credentials naming one of
+  them (compared as the variable it becomes: `Token` and `token` are one) fail the configuration;
+  any other shared field is never read, so it loads. One only Vault or a file can reveal fails the
+  send, naming it.
 
 The `ascender` and `awx` types start a job template through its webhook; see
 [Ascender and AWX](#ascender-and-awx).

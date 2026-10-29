@@ -260,7 +260,13 @@ mod tests {
     async fn a_timeout_kills_what_the_connector_started() {
         let dir = tempfile::tempdir().unwrap();
         let pidfile = dir.path().join("child.pid");
-        let mut c = call("tests/connectors/hang_wrapper.py", 1);
+        // 5 seconds, not 1: the wrapper must have started its child and
+        // written the pid before the timeout fires, and a cold interpreter
+        // can take longer than a second to get there. A pidfile that is
+        // missing is NOT read as "nothing started": the child can exist
+        // before its pid is written, and that is the leak this test exists
+        // to catch.
+        let mut c = call("tests/connectors/hang_wrapper.py", 5);
         c.config.insert(
             "pidfile".into(),
             Value::String(pidfile.display().to_string()),
@@ -268,7 +274,8 @@ mod tests {
         let err = ProcessConnector::new().list(&c, "x").await.unwrap_err();
         assert!(err.message.contains("killed"), "{err}");
 
-        let pid = std::fs::read_to_string(&pidfile).unwrap();
+        let pid = std::fs::read_to_string(&pidfile)
+            .expect("the wrapper writes its child's pid well within the timeout");
         let alive = |pid: &str| {
             // Gone, or a zombie waiting for init to reap it: not running.
             std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())).is_ok_and(|stat| {

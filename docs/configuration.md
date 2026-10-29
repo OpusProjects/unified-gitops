@@ -3,8 +3,8 @@
 Everything is YAML in one directory (`CONFIG_DIR`, default `./config`), one item per file:
 `config.yaml` at the root holds the server settings, and every other `*.yaml` / `*.yml`
 file, at any depth, holds items under a typed top-level key. Parsing is strict: an unknown key fails
-startup naming the file and the key. `unified-gitops --check-config` validates the directory exactly
-as startup does, and exits.
+startup naming the file and the key. `unified-gitops --check-config [dir]` validates the directory
+(`dir`, else `CONFIG_DIR`, else `./config`) exactly as startup does, and exits.
 
 ```
 /etc/unified-gitops/

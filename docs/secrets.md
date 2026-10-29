@@ -50,8 +50,9 @@ reads `LDAP_PASSWORD` and delivers `password`. `secret_keys` maps our names to
 fields of a Vault secret or of the JSON file.
 
 Setting both `env_vars` and `env_prefix` is refused at load, and so is
-`env_vars` beside a `vault_path`, a `secret_file` or `secret_keys`: a
-credential reads from one place.
+`env_vars` beside a `vault_path`, a `secret_file` or `secret_keys`, and two of
+`vault_path`, `env_prefix` and `secret_file` together: a credential reads from
+one place.
 
 The older form, `env_prefix` + `secret_keys` (prefix joined to each value with
 `_`), still loads but is deprecated: startup and `--check-config` name the
@@ -68,9 +69,16 @@ another application's values. Each field arrives twice:
 - `CREDENTIAL_<ID>_<FIELD>`, always. `<ID>` is the credential's name without a
   leading `cred-`/`cred_`, anything outside `a-z0-9` made `_`: the `password`
   of `cred-portainer-ldap` is `CREDENTIAL_PORTAINER_LDAP_PASSWORD`.
-- `CREDENTIAL_<FIELD>`, only when no other declared credential has that field.
+- `CREDENTIAL_<FIELD>`, only when no other declared credential has that field
+  (compared as the variable it becomes: `TOKEN` and `token` are one field).
   Two credentials with a `password` deliver neither as `CREDENTIAL_PASSWORD`,
   rather than one silently overwriting the other.
+
+A field no other credential has and already named after its own
+(`portainer_url` on `cred-portainer`) is not prefixed twice, so configurations
+written that way by hand deliver exactly what they did. If two values would
+still reach one variable (`cred-avamar`'s `aa1_url` and `cred-avamar-aa1`'s
+`url`), the run fails naming both, rather than one silently winning.
 
 An application's credentials must not be delivered under one id
 (`cred-vc-aa1` and `cred_vc_aa1` both become `CREDENTIAL_VC_AA1_*`): that is
@@ -101,8 +109,10 @@ resolution instead of being remembered for the TTL.
 The deprecated `secrets.cache_ttl_seconds` in `config.yaml`, while set, still
 caches every credential for that long, as it did — and replaces each Vault's
 own cache rather than stacking on it, so a rotation still takes at most that
-long. The deprecated `secrets.vault`, without it, keeps the 60-second cache
-0.3.0 gave it by default.
+long; an explicit `0` means no cache at all, Vaults included, as in 0.3.0.
+`vault_connection.cache_ttl_seconds` on `GET /api/v1/credentials` reports the
+cache in effect. The deprecated `secrets.vault`, without it, keeps the
+60-second cache 0.3.0 gave it by default.
 
 ---
 

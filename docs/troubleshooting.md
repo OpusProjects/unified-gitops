@@ -18,5 +18,5 @@ the last plan with its `errors`, and the run history with each operation's error
 The local copy of what the system has is at `GET /api/v1/applications/{id}/state/{kind}` and in
 `state.dir`: when a diff looks wrong, compare that file with the desired-state file directly.
 
-`unified-gitops --check-config` validates the configuration without starting; a typo in a config
-file is named with its key.
+`unified-gitops --check-config [dir]` validates the configuration without starting; a typo in a
+config file is named with its key. It checks `dir` when given, else `CONFIG_DIR`, else `./config`.
