@@ -185,6 +185,7 @@ async fn a_restricted_key_cannot_read_the_configuration() {
     let (app, _) = unified_gitops::AppBuilder::new()
         .from_config(&cfg)
         .api_keys(vec![ResolvedApiKey {
+            id: "consumer".to_string(),
             name: "consumer".to_string(),
             secret: KEY.to_string(),
             permissions: Permissions::Scoped {

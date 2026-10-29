@@ -17,7 +17,7 @@ it started; the web UI is unified-ui's `apps/unified-gitops`.
 ## Tech stack
 
 Rust (edition 2024), axum, tokio, serde + serde_json + serde-saphyr (reads config and desired
-state, writes the state copy), utoipa (OpenAPI), metrics + metrics-exporter-prometheus, subtle, and
+state, writes the state copy), utoipa (OpenAPI), metrics + metrics-exporter-prometheus, and
 [unified-auth](https://github.com/OpusProjects/unified-auth)'s `unified-secrets` and `unified-auth` crates.
 
 ## Build & run
@@ -103,18 +103,19 @@ parsed strictly (`deny_unknown_fields`); restart-only keys are named in `Restart
 
 ## Shared code with unified-api
 
-Credential resolution and LDAP sign-in come from
+Credential resolution, LDAP sign-in, API keys and browser sessions come from
 [unified-auth](https://github.com/OpusProjects/unified-auth), pinned by tag in `Cargo.toml`:
 `unified-secrets` (Credential, SecretsPort, env and Vault adapters, cache, `build_chain`,
 `SecretsConfig`) and `unified-auth` (DirectoryPort, LdapDirectory, `LdapConfig<R>`, the login use case
-and throttle). The modules that held them re-export them under their old paths; what stays here is
+and throttle, and its `http` module: API key registry and middleware, session store, CSRF, the form
+layer). The modules that held them re-export them under their old paths; what stays here is
 `CredentialRules` (load-time checks), the access rule type (`applications`) and its `grant_for`. Fix
 that code in unified-auth, release it, then move both services to the new tag in a `build:` PR
 (`cargo update -p unified-secrets -p unified-auth`); never patch a copy here. To try a change first,
 use an uncommitted `[patch."https://github.com/OpusProjects/unified-auth"]` pointing at a local
 checkout. `deny.toml` allows exactly this git source.
 
-Git/projects, process env, scheduler basics, API keys and sessions, the config API, metrics plumbing
+Git/projects, process env, scheduler basics, the config API, metrics plumbing
 and UI serving are still the same code as unified-api's, copied: fix a bug in one, check the other.
 
 ## Releasing

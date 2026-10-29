@@ -207,11 +207,13 @@ use unified_gitops::adapters::r#in::http::auth::{Permissions, ResolvedApiKey};
 fn keys() -> Vec<ResolvedApiKey> {
     vec![
         ResolvedApiKey {
+            id: "admin".to_string(),
             name: "admin".to_string(),
             secret: "adm".to_string(),
             permissions: Permissions::Admin,
         },
         ResolvedApiKey {
+            id: "limited".to_string(),
             name: "limited".to_string(),
             secret: "lim".to_string(),
             permissions: Permissions::Scoped {

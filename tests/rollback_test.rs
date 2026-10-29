@@ -113,11 +113,13 @@ async fn rollback_applies_an_older_commit_and_pauses_until_the_next_sync() {
         .api_key(Some("admin".into()))
         .api_keys(vec![
             ResolvedApiKey {
+                id: "admin".into(),
                 name: "admin".into(),
                 secret: "admin".into(),
                 permissions: Permissions::Admin,
             },
             ResolvedApiKey {
+                id: "other".into(),
                 name: "other".into(),
                 secret: "other".into(),
                 permissions: Permissions::Scoped {
@@ -309,6 +311,7 @@ async fn failed_rollbacks_do_not_pause_and_checks_never_apply_over_one() {
         .state_dir(state_dir.path().to_path_buf())
         .api_key(Some("admin".into()))
         .api_keys(vec![ResolvedApiKey {
+            id: "admin".into(),
             name: "admin".into(),
             secret: "admin".into(),
             permissions: Permissions::Admin,

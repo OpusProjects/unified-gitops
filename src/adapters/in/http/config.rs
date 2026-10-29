@@ -190,7 +190,8 @@ pub struct ReloadQuery {
 // of its TTL — the console outliving the revocation, which is the one thing a
 // revocation is for.
 fn swap_keys(state: &AppState, keys: &ApiKeys, resolved: Vec<ResolvedApiKey>) -> usize {
-    let live: Vec<String> = resolved.iter().map(|key| key.name.clone()).collect();
+    // By identity, what the shared session store revokes by.
+    let live: Vec<String> = resolved.iter().map(|key| key.id.clone()).collect();
     let count = resolved.len();
     keys.0.replace(resolved);
     state.sessions.retain_keys(&live);

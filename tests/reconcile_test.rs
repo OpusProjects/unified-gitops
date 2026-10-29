@@ -58,6 +58,7 @@ fn fixture_with(prune: bool, script: &str) -> Fixture {
         serde_saphyr::from_str("git_url: https://example.com/state.git\n").unwrap();
 
     let restricted = ResolvedApiKey {
+        id: "other".into(),
         name: "other".into(),
         secret: "other-secret".into(),
         permissions: Permissions::Scoped {
@@ -78,6 +79,7 @@ fn fixture_with(prune: bool, script: &str) -> Fixture {
         .api_key(Some("admin-secret".into()))
         .api_keys(vec![
             ResolvedApiKey {
+                id: "admin".into(),
                 name: "admin".into(),
                 secret: "admin-secret".into(),
                 permissions: Permissions::Admin,
