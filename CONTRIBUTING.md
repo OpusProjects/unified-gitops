@@ -59,7 +59,8 @@ rules that matter when writing code:
    operation; ordering, prune, drift and locks stay in `application/reconcile.rs`.
 
 Dependency direction is `adapters → application → ports → domain`, never the reverse.
-`domain/` stays pure: `std` + `serde` only.
+`domain/` stays pure: `std` + `serde` only, plus the types it shares with unified-api from
+[unified-auth](https://github.com/OpusProjects/unified-auth) (`Credential`, `LdapConfig`).
 
 ## Code comments
 

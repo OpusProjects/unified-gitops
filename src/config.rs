@@ -6,7 +6,7 @@ use std::path::Path;
 use crate::domain::api_key::{ApiKeyDef, ApiKeyRole};
 use crate::domain::app::Application;
 use crate::domain::connector::Connector;
-use crate::domain::credential::Credential;
+use crate::domain::credential::{Credential, CredentialRules};
 use crate::domain::project::GitProject;
 use crate::domain::webhook::Webhook;
 
@@ -145,26 +145,9 @@ fn default_state_dir() -> String {
     "state".to_string()
 }
 
-// Secrets behavior — config.yaml, `secrets:` section (optional)
-#[derive(Deserialize, Clone, PartialEq, Default)]
-#[serde(deny_unknown_fields)]
-pub struct SecretsConfig {
-    // How long a resolved credential may be reused before the backend is asked
-    // again. The TTL is also the rotation latency. 0 disables the cache.
-    //
-    // DEPRECATED, like the whole block: a Vault is now a `type: vault`
-    // credential with its own cache_ttl_seconds, and env and file credentials
-    // are read fresh. Set here, it still wraps every credential in one cache,
-    // as before, in place of each Vault's own. Absent = no such cache, except
-    // that the `vault` below keeps the 60 seconds this used to default to.
-    #[serde(default)]
-    pub cache_ttl_seconds: Option<u64>,
-
-    // Native Vault resolution (KV v2). Credentials that carry `vault_path`
-    // read from this Vault; those without keep resolving from env/files.
-    #[serde(default)]
-    pub vault: Option<crate::adapters::out::secrets::vault::VaultConfig>,
-}
+// Secrets behavior — config.yaml, `secrets:` section (optional, deprecated).
+// The struct lives with the chain it configures, in unified-secrets.
+pub use unified_secrets::SecretsConfig;
 
 // Where git projects are cloned — config.yaml, `projects:` section (optional)
 #[derive(Deserialize)]

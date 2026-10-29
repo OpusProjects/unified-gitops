@@ -20,17 +20,26 @@ so a reload in the middle of a run cannot mix an old application with a new conn
 
 ## Shared with unified-api
 
-unified-gitops started as a copy of unified-api 0.34.0 with the inventory removed. These parts are the
-same code and should stay the same until they move into a shared crate:
+unified-gitops started as a copy of unified-api 0.34.0 with the inventory removed. Credential resolution
+and LDAP sign-in now come from [unified-auth](https://github.com/OpusProjects/unified-auth), pinned by
+tag in `Cargo.toml`, and are re-exported under their old module paths:
+
+| Crate             | What it provides                                             | Re-exported here as |
+| ----------------- | ------------------------------------------------------------ | ------------------- |
+| `unified-secrets` | `Credential`, `SecretsPort`, env and Vault adapters, cache, `build_chain` | `domain::credential`, `ports::secrets`, `adapters::out::secrets` |
+| `unified-auth`    | `DirectoryPort`, `LdapDirectory`, `LdapConfig<R>`, the login use case | `ports::directory`, `adapters::out::directory`, `application::login` |
+
+What stays here is this service's own: the load-time checks on a credential (`CredentialRules`) and
+the access rule type (`applications`) with what it grants. These other parts are still the same code
+as unified-api's, copied, and should stay the same:
 
 | Part               | Where                                                       |
 | ------------------ | ----------------------------------------------------------- |
-| Secrets            | `adapters/out/secrets` (env, files, Vault, cache, reload)   |
 | Running scripts    | `adapters/out/process_env.rs`, `python.rs` (scrubbed env, venvs) |
 | Git checkouts      | `adapters/out/git`, `application/projects.rs`               |
 | Scheduler basics   | jitter, backoff, panic supervisor, reload generations       |
 | HTTP conventions   | `ApiError`, health shapes, metrics recorder, CORS, body limit |
-| Auth               | API keys, sessions, CSRF, LDAP sign-in, the login page      |
+| Auth               | API keys, sessions, CSRF, the login page                    |
 | Configuration      | strict loading, staged validation, atomic commit, live reload |
 | UI serving         | `ui_assets.rs`                                              |
 
