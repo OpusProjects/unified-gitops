@@ -1,6 +1,6 @@
 # Deployment
 
-The image is `ghcr.io/opusprojects/unified-gitops:<version>`, published from version tags only. It
+The image is `ghcr.io/opusprojects/unified-gitops:<version>`, published by each release only. It
 holds the binary, the web UI, Python 3 with `requests`, `pyyaml` and `jinja2` for connectors, and `git`.
 It holds no configuration: mount yours at `/app/config` (the default `CONFIG_DIR`) or set `CONFIG_DIR`.
 

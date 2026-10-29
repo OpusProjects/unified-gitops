@@ -50,6 +50,7 @@ network, and a change made by hand on a system shows up as drift.
 | [LDAP sign-in](docs/ldap-login.md)        | Directory accounts, access rules and sessions                          |
 | [Observability](docs/observability.md)    | Logs, metrics and the alerts worth having                              |
 | [Projects](docs/projects.md)              | Git checkouts: when they are pulled, credentials, virtualenvs          |
+| [Releasing](docs/releasing.md)            | How release-please cuts a version, the CHANGELOG, a stuck release PR   |
 | [Secrets](docs/secrets.md)                | Credential backends, the resolution cache, native Vault                |
 | [Testing](docs/testing.md)                | Running the suite and what it covers                                   |
 | [Web UI](docs/ui.md)                      | The UI the image serves and how signing in works                       |
