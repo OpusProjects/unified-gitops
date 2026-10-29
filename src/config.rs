@@ -24,6 +24,40 @@ pub struct AppConfig {
     pub webhooks: HashMap<String, Webhook>,
 }
 
+// Two credentials delivered under one id would overwrite each other's
+// CREDENTIAL_<ID>_<FIELD> values, silently.
+fn delivery_clashes(who: &str, credential_ids: &[String]) -> Vec<String> {
+    let mut by_id: std::collections::BTreeMap<String, Vec<&String>> = Default::default();
+    for cred_id in credential_ids {
+        let ids = by_id
+            .entry(crate::domain::credential::delivery_id(cred_id))
+            .or_default();
+        // Listed twice is still one credential.
+        if !ids.contains(&cred_id) {
+            ids.push(cred_id);
+        }
+    }
+    by_id
+        .into_iter()
+        .filter(|(_, ids)| ids.len() > 1)
+        .map(|(delivered, ids)| {
+            format!(
+                "{who} uses credentials {} that are all delivered as CREDENTIAL_{}_* — \
+                 rename one",
+                quoted(&ids),
+                delivered.to_uppercase()
+            )
+        })
+        .collect()
+}
+
+fn quoted(ids: &[&String]) -> String {
+    ids.iter()
+        .map(|c| format!("'{c}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn vault_as_login(who: &str, credential_id: &str) -> String {
     format!(
         "{who} uses credential '{credential_id}', which is a Vault connection: name the \
@@ -121,7 +155,8 @@ pub struct SecretsConfig {
     // DEPRECATED, like the whole block: a Vault is now a `type: vault`
     // credential with its own cache_ttl_seconds, and env and file credentials
     // are read fresh. Set here, it still wraps every credential in one cache,
-    // as before. Absent = no such cache.
+    // as before, in place of each Vault's own. Absent = no such cache, except
+    // that the `vault` below keeps the 60 seconds this used to default to.
     #[serde(default)]
     pub cache_ttl_seconds: Option<u64>,
 
@@ -493,6 +528,10 @@ impl AppConfig {
                     errors.push(vault_as_login(&format!("Application '{id}'"), cred));
                 }
             }
+            errors.extend(delivery_clashes(
+                &format!("Application '{id}'"),
+                &app.credentials,
+            ));
         }
 
         // A cron schedule must parse, and a project cannot have two cadences.
@@ -572,6 +611,11 @@ impl AppConfig {
                     errors.push(vault_as_login(&format!("Webhook '{id}'"), cred));
                 }
             }
+            errors.extend(delivery_clashes(
+                &format!("Webhook '{id}'"),
+                webhook.credentials(),
+            ));
+            errors.extend(self.shared_field_errors(id, webhook.credentials()));
         }
 
         for (id, credential) in &self.credentials {
@@ -651,6 +695,37 @@ impl AppConfig {
             .collect();
         notices.sort();
         notices
+    }
+
+    // A webhook reads its credentials' fields by their bare names only
+    // (`token`, `username`, `password`, the signing secret), and a field two
+    // of them have is delivered under neither bare name: a default auth would
+    // silently send no Authorization, and bearer, header, basic or a
+    // signature would fail at every send for a field that seems to be there.
+    // Refused where the configuration says which fields a credential has.
+    fn shared_field_errors(&self, id: &str, credential_ids: &[String]) -> Vec<String> {
+        let mut holders: std::collections::BTreeMap<String, Vec<&String>> = Default::default();
+        let mut seen = std::collections::HashSet::new();
+        for cred_id in credential_ids.iter().filter(|c| seen.insert(c.as_str())) {
+            let Some(credential) = self.credentials.get(cred_id) else {
+                continue;
+            };
+            for field in credential.declared_fields() {
+                holders.entry(field).or_default().push(cred_id);
+            }
+        }
+        holders
+            .into_iter()
+            .filter(|(_, ids)| ids.len() > 1)
+            .map(|(field, ids)| {
+                format!(
+                    "Webhook '{id}' uses credentials {} that all have a '{field}' field — a \
+                     webhook reads '{field}' by its bare name, which no credential keeps when \
+                     two share it; keep '{field}' in one of them",
+                    quoted(&ids)
+                )
+            })
+            .collect()
     }
 
     fn is_vault(&self, credential_id: &str) -> bool {
@@ -1022,6 +1097,91 @@ mod tests {
     const APPLICATION: &str =
         "applications:\n  - name: portainer\n    connector: kv\n    project: prj-state\n";
     const CREDENTIAL: &str = "credentials:\n  - name: cred-key\n    type: token\n    env_prefix: JT\n    secret_keys:\n      token: KEY\n";
+
+    // Two credentials one application would deliver under one id are
+    // refused, and so are a webhook's: each would overwrite the other's
+    // CREDENTIAL_<ID>_<FIELD> values.
+    #[test]
+    fn an_application_s_credentials_never_collide() {
+        let creds = "credentials:\n  - name: cred-vc-aa1\n    type: token\n    env_vars:\n      token: A\n  - name: cred_vc_aa1\n    type: token\n    env_vars:\n      url: B\n";
+        let dir = dir_with(&[
+            ("connectors/kv.yaml", CONNECTOR),
+            ("projects.yaml", PROJECT),
+            (
+                "applications/portainer.yaml",
+                "applications:\n  - name: portainer\n    connector: kv\n    project: prj-state\n    credentials: [cred-vc-aa1, cred_vc_aa1]\n",
+            ),
+            ("credentials.yaml", creds),
+            (
+                "webhooks/w.yaml",
+                "webhooks:\n  - name: w\n    type: webhook\n    events: [sync_failed]\n    applications: [portainer]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-vc-aa1, cred_vc_aa1]\n",
+            ),
+        ]);
+        let err = load_err(&dir);
+        assert!(
+            err.contains(
+                "Application 'portainer' uses credentials 'cred-vc-aa1', 'cred_vc_aa1' that are \
+                 all delivered as CREDENTIAL_VC_AA1_* — rename one"
+            ),
+            "{err}"
+        );
+        assert!(
+            err.contains("Webhook 'w' uses credentials 'cred-vc-aa1', 'cred_vc_aa1' that are all delivered as CREDENTIAL_VC_AA1_*"),
+            "{err}"
+        );
+    }
+
+    // A credential listed twice is one credential: nothing collides.
+    #[test]
+    fn a_credential_listed_twice_does_not_collide_with_itself() {
+        let dir = dir_with(&[
+            ("connectors/kv.yaml", CONNECTOR),
+            ("projects.yaml", PROJECT),
+            (
+                "applications/portainer.yaml",
+                "applications:\n  - name: portainer\n    connector: kv\n    project: prj-state\n    credentials: [cred-key, cred-key]\n",
+            ),
+            ("credentials/cred-key.yaml", CREDENTIAL),
+            (
+                "webhooks/w.yaml",
+                "webhooks:\n  - name: w\n    type: webhook\n    events: [sync_failed]\n    applications: [portainer]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-key, cred-key]\n",
+            ),
+        ]);
+        load_config(dir.path().to_str().unwrap()).expect("loads");
+    }
+
+    // A webhook reads bare field names only, which two credentials sharing a
+    // field both lose: refused at load, naming the field and the credentials,
+    // where the configuration says which fields each has.
+    #[test]
+    fn a_webhook_s_credentials_must_not_share_a_field() {
+        let creds = "credentials:\n  - name: cred-auth\n    type: token\n    env_vars:\n      token: AUTH_TOKEN\n  - name: cred-sign\n    type: token\n    env_prefix: SIGN\n    secret_keys:\n      token: TOKEN\n      secret: SECRET\n  - name: cred-vaulted\n    type: token\n    vault: cred-vault\n    vault_path: team/x\n  - name: cred-vault\n    type: vault\n    address: https://vault.example.com\n    env_vars:\n      token: VAULT_TOKEN\n";
+        let dir = dir_with(&[
+            ("connectors/kv.yaml", CONNECTOR),
+            ("projects.yaml", PROJECT),
+            ("applications/portainer.yaml", APPLICATION),
+            ("credentials.yaml", creds),
+            (
+                "webhooks/w.yaml",
+                "webhooks:\n  - name: w\n    type: webhook\n    events: [sync_failed]\n    applications: [portainer]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-auth, cred-sign]\n      sign: {}\n",
+            ),
+            // Whatever fields a whole Vault secret holds is not knowable at
+            // load: that one loads, and the send says what is shared.
+            (
+                "webhooks/v.yaml",
+                "webhooks:\n  - name: v\n    type: webhook\n    events: [sync_failed]\n    applications: [portainer]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-auth, cred-vaulted]\n",
+            ),
+        ]);
+        let err = load_err(&dir);
+        assert!(
+            err.contains(
+                "Webhook 'w' uses credentials 'cred-auth', 'cred-sign' that all have a 'token' field"
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("'secret' field"), "{err}");
+        assert!(!err.contains("Webhook 'v'"), "{err}");
+    }
 
     #[test]
     fn webhooks_load_as_items() {

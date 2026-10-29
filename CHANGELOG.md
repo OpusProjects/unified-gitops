@@ -8,7 +8,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Credentials name their environment variables in full with `env_vars: {<field>: <VAR>}` (`env_vars: {password: LDAP_PASSWORD}` reads `LDAP_PASSWORD` as `password`), and API keys with `env_vars: {key: <VAR>}`; `env_vars` and `env_prefix` on one credential, `secret_keys` next to `env_vars` without a `vault_path` or `secret_file`, an API key `env_vars` field other than `key`, and an API key with both or neither of `env_vars.key` and `env` are refused at load (see `docs/secrets.md`).
+- Credentials name their environment variables in full with `env_vars: {<field>: <VAR>}` (`env_vars: {password: LDAP_PASSWORD}` reads `LDAP_PASSWORD` as `password`), and API keys with `env_vars: {key: <VAR>}`; `env_vars` and `env_prefix` on one credential, `env_vars` beside a `vault_path`, `secret_file` or `secret_keys`, an API key `env_vars` field other than `key`, and an API key with both or neither of `env_vars.key` and `env` are refused at load (see `docs/secrets.md`).
 - Every credential field also reaches the connector under its credential's id, `CREDENTIAL_<ID>_<FIELD>` (the name without a leading `cred-`/`cred_`, anything outside `a-z0-9` made `_`: `cred-portainer-ldap`'s `password` is `CREDENTIAL_PORTAINER_LDAP_PASSWORD`), so an application can use two credentials with the same fields; a field already named after its credential (`portainer_url` on `cred-portainer`) is not prefixed again.
 - A project's last pulls: `history` on each project in `GET /api/v1/projects`, newest first, up to 50, in memory since the process started, as an application's runs are. Each says when it started, how long it took, why (`scheduled`, `manual`, `check` before an application's check or sync, kept only when it moved the commit or failed, `startup`), who asked a manual one (the API key's name or the signed-in user), how it ended, and the commit it found the checkout at and left it at (see `docs/projects.md`).
 - A Vault is a credential of `type: vault` (`address`, `mount`, `env_vars: {token: <VAR>}` or `kubernetes_role`, `timeout_seconds`, `cache_ttl_seconds`), as AWX models a Vault lookup; a credential reads from it with `vault: <its name>` and `vault_path`, so several Vaults can coexist, each with its own login and cache. Naming a Vault credential as an application's, project's, webhook's or LDAP bind's credential, a Vault field on another type, and a `vault:` that is not a Vault are refused at load; `GET /api/v1/credentials` adds `vault`, `used_by.credentials` on a Vault lists the credentials reading from it, and `vault_connection` (address, mount, auth, kubernetes_role, token_env, timeout_seconds, cache_ttl_seconds) describes each Vault, null for any other type (see `docs/secrets.md`).
@@ -16,7 +16,7 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **Breaking (scripts reading a field two credentials share):** `CREDENTIAL_<FIELD>` is delivered only when exactly one of the application's credentials has that field, instead of one credential silently overwriting the other; read `CREDENTIAL_<ID>_<FIELD>`.
+- **Breaking (scripts reading a field two credentials share, and webhooks with several credentials):** `CREDENTIAL_<FIELD>` is delivered only when exactly one of the application's credentials has that field, instead of one credential silently overwriting the other; read `CREDENTIAL_<ID>_<FIELD>`. Two credentials one application or webhook would deliver under one id (`cred-vc-aa1` and `cred_vc_aa1`) are refused, a webhook whose credentials name the same field is refused (it reads `token`, `username`, `password` and the signing secret by their bare names, which a shared field loses), and `env_vars` beside a `vault_path`, `secret_file` or `secret_keys` is refused instead of one side being silently ignored.
 - Env and file credentials are read on every resolution instead of being reused for 60 seconds: a rotated mounted file is seen on the next check. Only a Vault caches, for its own `cache_ttl_seconds`; `GET /api/v1/settings` answers `secrets.cache_ttl_seconds` as null unless `config.yaml` still sets it.
 
 ### Deprecated
@@ -27,6 +27,10 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A configuration still on the deprecated `secrets.vault` keeps its 60-second cache when `secrets.cache_ttl_seconds` is absent, as 0.3.0 did by default, instead of reading Vault on every resolution; set, that outer cache replaces each Vault's own instead of stacking on it.
+- A field already named after its credential is recognised in any case (`AVAMAR_AA1_URL` on `cred-avamar-aa1`) and not prefixed again.
+- A webhook send whose `token`, `username`, `password` or signing field two of its credentials share says the field is shared instead of "the credential has no 'token' field", and a default auth fails the same way instead of silently sending no `Authorization`.
+- A reload logs the same deprecation notices startup does; a Vault credential with `timeout_seconds: 0` is refused.
 - Starting connector scripts retries briefly on "text file busy" (ETXTBSY) instead of failing the run: a script still open for writing elsewhere, such as one a project pull is rewriting, or a file another thread's child briefly held, now runs once the writer lets go.
 
 ## [0.3.0] - 2026-10-27

@@ -192,7 +192,9 @@ naming one there is refused, since its token is not a login.
 The `secrets:` block in `config.yaml` (`cache_ttl_seconds`, and a single `vault:` with `token_env`)
 still loads but is **deprecated**: startup and `--check-config` say what to write instead, and a
 later release refuses it. While it is set, its `cache_ttl_seconds` still caches every credential, as
-it did, and a `vault_path` with no `vault:` reads from its `vault:`.
+it did (in place of each Vault's own cache, never on top of it), and a `vault_path` with no `vault:`
+reads from its `vault:`, cached for 60 seconds when `cache_ttl_seconds` is absent, as 0.3.0 did by
+default.
 
 An API key names the env var holding its secret, and is `admin` or restricted to applications:
 
@@ -209,6 +211,13 @@ api_keys:
 
 The older `env_prefix` + `secret_keys` (credentials) and `env: VAR` (API keys) still load, with a
 notice at startup and from `--check-config` naming the `env_vars` to write; a later release refuses them.
+Setting both forms on one credential is refused, and so is `env_vars` beside a `vault_path`, a
+`secret_file` or `secret_keys`: a credential reads from one place.
+
+Two rules keep the variables a script or a webhook receives unambiguous (see [secrets](secrets.md)):
+an application's or a webhook's credentials must not be delivered under one id (`cred-vc-aa1` and
+`cred_vc_aa1` both become `CREDENTIAL_VC_AA1_*`), and a webhook's credentials must not share a field,
+since a webhook reads each one by its bare name (`token`, `username`), which a shared field loses.
 
 `UNIFIED_GITOPS_KEY`, if set, is one more admin key. With no keys at all the API is open, which is
 logged loudly at startup.
