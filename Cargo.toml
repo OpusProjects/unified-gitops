@@ -15,9 +15,9 @@ publish = false
 
 [dependencies]
 axum = "0.8"
-# Basic auth header for git-over-https credentials. default-features = false
-# drops base64's default `simd-unsafe` feature: we encode one short header per
-# git operation, so the SIMD engines' unsafe code buys nothing here.
+# Basic auth header for webhook credentials. default-features = false drops
+# base64's default `simd-unsafe` feature: we encode one short header per
+# request, so the SIMD engines' unsafe code buys nothing here.
 base64 = { version = "0.23", default-features = false, features = ["std"] }
 dashmap = "6"
 # Content hashes for the configuration API: a file's ETag is the sha256 of
@@ -37,6 +37,10 @@ serde-saphyr = "2"       # pure-Rust YAML (no unsafe-libyaml): reads config and 
 # building against a local checkout.
 unified-secrets = { git = "https://github.com/OpusProjects/auth", tag = "v0.2.0" }
 unified-auth = { git = "https://github.com/OpusProjects/auth", tag = "v0.2.0" }
+# Git checkouts (clone, pull, commits, export), shared with unified-api. See
+# the git repository's docs/development.md for building against a local
+# checkout.
+unified-git = { git = "https://github.com/OpusProjects/git", tag = "v0.1.0" }
 tokio = { version = "1", features = ["full"] }
 # The CORS middleware wraps tower-http's CorsLayer around the rest of the
 # stack per request (Layer + oneshot from `util`), which is what makes the
@@ -65,3 +69,4 @@ tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
 tower = "0.5"            # to call the app as a service (no TCP)
 http-body-util = "0.1"   # to read the body of responses
+
