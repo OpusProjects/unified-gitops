@@ -27,10 +27,10 @@ their old module paths:
 
 | Crate             | What it provides                                             | Re-exported here as |
 | ----------------- | ------------------------------------------------------------ | ------------------- |
-| `unified-secrets` | `Credential`, `SecretsPort`, env and Vault adapters, cache, `build_chain` | `domain::credential`, `ports::secrets`, `adapters::out::secrets` |
-| `unified-auth`    | `DirectoryPort`, `LdapDirectory`, `LdapConfig<R>`, the login use case | `ports::directory`, `adapters::out::directory`, `application::login` |
-| `unified-auth` (`http`) | API key registry and middleware, session store, CSRF, form layer | `adapters::in::http::auth`, `adapters::in::http::session` |
-| `unified-git`     | `GitPort`, `CliGit`: clone, pull, commits, export, address redaction | `ports::git`, `adapters::out::git::cli`, `domain::project` |
+| `secrets-rs` | `Credential`, `SecretsPort`, env and Vault adapters, cache, `build_chain` | `domain::credential`, `ports::secrets`, `adapters::out::secrets` |
+| `auth-rs`    | `DirectoryPort`, `LdapDirectory`, `LdapConfig<R>`, the login use case | `ports::directory`, `adapters::out::directory`, `application::login` |
+| `auth-rs` (`http`) | API key registry and middleware, session store, CSRF, form layer | `adapters::in::http::auth`, `adapters::in::http::session` |
+| `git-rs`     | `GitPort`, `CliGit`: clone, pull, commits, export, address redaction | `ports::git`, `adapters::out::git::cli`, `domain::project` |
 
 What stays here is this service's own: the load-time checks on a credential (`CredentialRules`) and
 the access rule type (`applications`) with what it grants, `Permissions`, how api_keys.yaml becomes keys

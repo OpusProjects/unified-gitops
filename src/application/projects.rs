@@ -430,7 +430,7 @@ mod tests {
         fn ensure(
             &self,
             _dir: &Path,
-            _remote: &unified_git::Remote,
+            _remote: &git_rs::Remote,
             _credentials: &HashMap<String, String>,
         ) -> GitFuture<'_> {
             let fail_with = self.fail_with.clone();
@@ -450,7 +450,7 @@ mod tests {
         fn ensure(
             &self,
             _dir: &Path,
-            _remote: &unified_git::Remote,
+            _remote: &git_rs::Remote,
             _credentials: &HashMap<String, String>,
         ) -> GitFuture<'_> {
             Box::pin(std::future::pending())
@@ -592,7 +592,7 @@ mod tests {
         fn ensure(
             &self,
             _dir: &Path,
-            _remote: &unified_git::Remote,
+            _remote: &git_rs::Remote,
             _credentials: &HashMap<String, String>,
         ) -> GitFuture<'_> {
             use std::sync::atomic::Ordering::SeqCst;
@@ -668,7 +668,7 @@ mod tests {
         fn ensure(
             &self,
             _dir: &Path,
-            _remote: &unified_git::Remote,
+            _remote: &git_rs::Remote,
             _credentials: &HashMap<String, String>,
         ) -> GitFuture<'_> {
             *self.at.lock().unwrap() = "bbb";
@@ -727,7 +727,7 @@ mod tests {
         fn ensure(
             &self,
             _dir: &Path,
-            _remote: &unified_git::Remote,
+            _remote: &git_rs::Remote,
             _credentials: &HashMap<String, String>,
         ) -> GitFuture<'_> {
             Box::pin(async move {

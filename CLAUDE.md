@@ -18,7 +18,7 @@ it started; the web UI is the ui repository's `apps/unified-gitops`.
 
 Rust (edition 2024), axum, tokio, serde + serde_json + serde-saphyr (reads config and desired
 state, writes the state copy), utoipa (OpenAPI), metrics + metrics-exporter-prometheus, and
-[auth](https://github.com/OpusProjects/auth)'s `unified-secrets` and `unified-auth` crates.
+[auth](https://github.com/OpusProjects/auth)'s `secrets-rs` and `auth-rs` crates.
 
 ## Build & run
 
@@ -105,17 +105,17 @@ parsed strictly (`deny_unknown_fields`); restart-only keys are named in `Restart
 
 Credential resolution, LDAP sign-in, API keys and browser sessions come from
 [auth](https://github.com/OpusProjects/auth), pinned by tag in `Cargo.toml`:
-`unified-secrets` (Credential, SecretsPort, env and Vault adapters, cache, `build_chain`,
-`SecretsConfig`) and `unified-auth` (DirectoryPort, LdapDirectory, `LdapConfig<R>`, the login use case
+`secrets-rs` (Credential, SecretsPort, env and Vault adapters, cache, `build_chain`,
+`SecretsConfig`) and `auth-rs` (DirectoryPort, LdapDirectory, `LdapConfig<R>`, the login use case
 and throttle, and its `http` module: API key registry and middleware, session store, CSRF, the form
 layer). The modules that held them re-export them under their old paths; what stays here is
 `CredentialRules` (load-time checks), the access rule type (`applications`) and its `grant_for`. Fix
 that code in the auth repository, release it, then move both services to the new tag in a `build:` PR
-(`cargo update -p unified-secrets -p unified-auth`); never patch a copy here. To try a change first,
+(`cargo update -p secrets-rs -p auth-rs`); never patch a copy here. To try a change first,
 use an uncommitted `[patch."https://github.com/OpusProjects/auth"]` pointing at a local
 checkout. `deny.toml` allows exactly these git sources (auth and git).
 
-Git checkouts come the same way from [git](https://github.com/OpusProjects/git)'s `unified-git` crate:
+Git checkouts come the same way from [git](https://github.com/OpusProjects/git)'s `git-rs` crate:
 `GitPort`, `Remote`, `Commit`, `CommitRange` and `CliGit` (clone, pull, revision, tree, commits,
 export), and `without_userinfo` / `redact_userinfo`, re-exported from `ports::git`,
 `adapters::out::git::cli` and `domain::project`. `GitProject::remote()` is what a project hands to git;
