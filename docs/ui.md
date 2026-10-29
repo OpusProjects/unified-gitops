@@ -5,8 +5,8 @@ and see every application's status and run history, the connectors, and the proj
 metrics and configuration behind them. The pending plan and each system's current settings are in
 the API (`GET /api/v1/applications/{id}` and `…/state/{kind}`).
 
-The UI is [unified-ui](https://github.com/OpusProjects/unified-ui)'s `apps/unified-gitops`, built
-from the same components as unified-api's UI. Each unified-gitops release builds the unified-ui
+The UI is [ui](https://github.com/OpusProjects/ui)'s `apps/unified-gitops`, built
+from the same components as unified-api's UI. Each unified-gitops release builds the ui
 version it was tested with into its image (`UI_REF` in `docker/Dockerfile`).
 
 ## Turning it on

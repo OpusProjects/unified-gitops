@@ -65,7 +65,7 @@ code that handles the objects, once, the way a Kubernetes API server describes i
 ## The Python SDK
 
 The SDK, the `unified_connectors` package in
-[unified-connectors](https://github.com/OpusProjects/unified-connectors), implements the contract.
+[connectors](https://github.com/OpusProjects/connectors), implements the contract.
 A connector writes two functions:
 
 ```python
@@ -125,7 +125,7 @@ the write guard stops accidents in the script, and the system's own permissions 
 ## Testing a connector by hand
 
 ```bash
-# in a unified-connectors checkout
+# in a connectors checkout
 export APPLICATION_CONFIG='{"dir": "/tmp/store"}'
 ./kv/kv.py describe
 ./kv/kv.py list --kind namespace
