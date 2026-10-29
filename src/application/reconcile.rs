@@ -256,7 +256,7 @@ async fn export_tree(
         .projects
         .get(&app.project)
         .ok_or_else(|| format!("project '{}' is not configured", app.project))?;
-    let credentials = match &project.credential {
+    let credentials = match project.credential_id() {
         Some(id) => r
             .secrets
             .resolve(id)

@@ -118,7 +118,7 @@ pub async fn list_projects(
             // clones from the configured value.
             git_url: crate::domain::project::without_userinfo(&project.git_url),
             branch: project.branch.clone(),
-            credential: project.credential.clone(),
+            credential: project.credential_id().map(str::to_string),
             checkout_present,
             revision: if checkout_present {
                 state.git.revision(&state.projects_dir.join(id)).await

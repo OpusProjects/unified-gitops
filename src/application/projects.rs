@@ -216,7 +216,7 @@ async fn run(
     list_commits: bool,
 ) -> Pulled {
     let dir = projects_dir.join(project_id);
-    let credentials = match &project.credential {
+    let credentials = match project.credential_id() {
         Some(credential_id) => match secrets.resolve(credential_id).await {
             Ok(credentials) => credentials,
             Err(e) => {
@@ -553,7 +553,7 @@ mod tests {
         let git = StubGit { fail_with: None };
 
         let project: GitProject = serde_saphyr::from_str(
-            "git_url: \"https://example.com/repo.git\"\ncredential: \"cred-ghost\"\n",
+            "git_url: \"https://example.com/repo.git\"\ncredentials: [\"cred-ghost\"]\n",
         )
         .expect("project fixture");
 
