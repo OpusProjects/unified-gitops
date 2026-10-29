@@ -27,22 +27,19 @@ getrandom = "0.4"
 sha2 = "0.11"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
-# Vault (KV v2) over HTTPS. rustls instead of openssl to keep the build
+# Webhooks over HTTPS. rustls instead of openssl to keep the build
 # self-contained.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive", "rc"] }   # rc: Serialize/Deserialize for Arc<T>
 serde_json = "1"
 serde-saphyr = "2"       # pure-Rust YAML (no unsafe-libyaml): reads config and desired state, writes the state copy
 subtle = "2"
-# LDAP login for the browsable API: bind, look the user up, bind as them.
-# rustls on ring, the TLS stack and crypto provider already in the tree, so no
-# OpenSSL comes with it.
-ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-ring"] }
-# A private CA for the directory (`ldap.ca_file`): the TLS config is built here
-# and handed to ldap3. Both crates are already in the tree through ldap3 and
-# reqwest.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pki-types = { version = "1", features = ["std"] }
+# Credential resolution (env vars, JSON files, Vault) and LDAP sign-in, shared
+# with unified-api: one repository, two crates, released together, so both
+# lines always name the same tag. See unified-auth's docs/development.md for
+# building against a local checkout.
+unified-secrets = { git = "https://github.com/OpusProjects/unified-auth", tag = "v0.1.0" }
+unified-auth = { git = "https://github.com/OpusProjects/unified-auth", tag = "v0.1.0" }
 tokio = { version = "1", features = ["full"] }
 # The CORS middleware wraps tower-http's CorsLayer around the rest of the
 # stack per request (Layer + oneshot from `util`), which is what makes the
