@@ -108,13 +108,19 @@ they move into a shared crate (unified-core).
 
 ## Releasing
 
-Same process as unified-api (see its CLAUDE.md): `release/x.y.z` branch, bump `Cargo.toml` +
-`Cargo.lock` + CHANGELOG, PR, squash-merge, tag the squashed commit on `main`; CI publishes
-`ghcr.io/opusprojects/unified-gitops` and the GitHub Release from the tag.
+Same process as unified-api (see its CLAUDE.md, and `docs/releasing.md` here): release-please
+(`.github/workflows/release.yml`, as `github-actions[bot]`) keeps one `chore: release vX.Y.Z` PR open
+that bumps `Cargo.toml`, `Cargo.lock` and the manifest and writes the CHANGELOG from the squashed PR
+titles. A PR's title is its CHANGELOG line and decides the version (`feat:` MINOR, `fix:`/`perf:`
+PATCH, hidden types release nothing), so write it for a release-notes reader. CI on the release PR is
+dispatched by `release.yml` (`gh workflow run build.yaml --ref release-please--branches--main` if it
+is missing). Merging it is the release: tag `vX.Y.Z`, GitHub Release, and the image
+`ghcr.io/opusprojects/unified-gitops` as `X.Y.Z`, `<sha>` and `latest`. Never bump, tag or release by
+hand; `UI_REF` in `docker/Dockerfile` moves in its own `build:` PR.
 
 ## Conventions
 
-- Only `## [Unreleased]` is editable in CHANGELOG.md.
+- CHANGELOG.md is written by release-please: no entries in feature PRs, the PR title is the entry.
 - Private by default, `pub` only what needs exposing. Comments only when the WHY is non-obvious.
 - All code comments in English. Teaching comments that explain Rust concepts are intentional —
   keep them with the code they explain.

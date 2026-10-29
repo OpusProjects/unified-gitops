@@ -4,8 +4,6 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
-
 ## [0.4.0] - 2026-10-29
 
 ### Added
@@ -73,7 +71,6 @@ First version: GitOps for anything with an API.
 - Configuration as code, one item per file, validated strictly, reloadable live and pushable over the configuration API.
 - API keys and LDAP sign-in, secrets from env or Vault, Prometheus metrics, and the web UI from unified-ui 0.2.0.
 
-[Unreleased]: https://github.com/OpusProjects/unified-gitops/compare/v0.4.0...HEAD
 [0.4.0]: https://github.com/OpusProjects/unified-gitops/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/OpusProjects/unified-gitops/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/OpusProjects/unified-gitops/compare/v0.1.0...v0.2.0
