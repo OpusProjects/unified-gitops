@@ -307,13 +307,17 @@ pub fn build_request(
     message: &Map<String, Value>,
     credentials: &HashMap<String, String>,
 ) -> Result<OutboundRequest, String> {
+    let credentials = Fields {
+        values: credentials,
+        credential_ids: webhook.credentials(),
+    };
     match webhook.webhook_type {
         WebhookType::Webhook => {
             let target = webhook
                 .webhook
                 .as_ref()
                 .ok_or("type webhook needs a 'webhook:' block")?;
-            webhook_request(target, message, credentials)
+            webhook_request(target, message, &credentials)
         }
         WebhookType::Ascender | WebhookType::Awx => {
             let target = webhook
@@ -321,7 +325,7 @@ pub fn build_request(
                 .as_ref()
                 .or(webhook.awx.as_ref())
                 .ok_or("a job template webhook needs its block")?;
-            job_template_request(target, message, credentials)
+            job_template_request(target, message, &credentials)
         }
     }
 }
@@ -337,12 +341,48 @@ fn base_headers(event: &str) -> Vec<(String, String)> {
     ]
 }
 
-fn field<'a>(credentials: &'a HashMap<String, String>, name: &str) -> Result<&'a str, String> {
-    credentials
-        .get(name)
-        .map(String::as_str)
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| format!("the credential has no '{name}' field"))
+// The webhook's resolved credentials, read by bare field name. A bare name
+// is delivered only when exactly one of the credentials has the field
+// (application::credentials), so a field two of them share is absent here
+// though each has it: that is told apart from a field none has, which would
+// otherwise read as "the credential has no 'token' field" about a token that
+// is plainly configured. Refused at load where the configuration names the
+// fields; a whole Vault secret or JSON file is only known here.
+struct Fields<'a> {
+    values: &'a HashMap<String, String>,
+    credential_ids: &'a [String],
+}
+
+impl<'a> Fields<'a> {
+    // The field, possibly empty; None when no credential has it.
+    fn optional(&self, name: &str) -> Result<Option<&'a str>, String> {
+        if let Some(value) = self.values.get(name) {
+            return Ok(Some(value));
+        }
+        let mut holders: Vec<&String> = Vec::new();
+        for id in self.credential_ids {
+            let under_id = format!("{}_{name}", crate::domain::credential::delivery_id(id));
+            if !holders.contains(&id) && self.values.contains_key(&under_id) {
+                holders.push(id);
+            }
+        }
+        if holders.len() > 1 {
+            let named: Vec<String> = holders.iter().map(|id| format!("'{id}'")).collect();
+            return Err(format!(
+                "credentials {} all have a '{name}' field, so it is delivered under neither's \
+                 bare name: keep '{name}' in one of them",
+                named.join(", ")
+            ));
+        }
+        Ok(None)
+    }
+
+    // The field, which must be there and not empty.
+    fn required(&self, name: &str) -> Result<&'a str, String> {
+        self.optional(name)?
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| format!("the credential has no '{name}' field"))
+    }
 }
 
 // Sets a header, replacing any of the same name (headers are not case
@@ -370,7 +410,7 @@ fn check_headers(headers: &[(String, String)]) -> Result<(), String> {
 fn webhook_request(
     target: &HttpTarget,
     message: &Map<String, Value>,
-    credentials: &HashMap<String, String>,
+    credentials: &Fields,
 ) -> Result<OutboundRequest, String> {
     let body = match &target.body {
         Some(template) => render(template, message).into_bytes(),
@@ -386,21 +426,18 @@ fn webhook_request(
         Auth::Scheme(AuthScheme::Bearer) => set_header(
             &mut headers,
             "Authorization",
-            format!("Bearer {}", field(credentials, "token")?),
+            format!("Bearer {}", credentials.required("token")?),
         ),
         Auth::Default => {
-            if let Some(token) = credentials.get("token").filter(|t| !t.is_empty()) {
+            if let Some(token) = credentials.optional("token")?.filter(|t| !t.is_empty()) {
                 set_header(&mut headers, "Authorization", format!("Bearer {token}"));
             }
         }
         Auth::Scheme(AuthScheme::Basic) => {
             // An empty password is allowed: some APIs take a key as the
             // username and nothing after the colon.
-            let password = credentials
-                .get("password")
-                .map(String::as_str)
-                .unwrap_or("");
-            let pair = format!("{}:{password}", field(credentials, "username")?);
+            let password = credentials.optional("password")?.unwrap_or("");
+            let pair = format!("{}:{password}", credentials.required("username")?);
             set_header(
                 &mut headers,
                 "Authorization",
@@ -414,13 +451,13 @@ fn webhook_request(
             set_header(
                 &mut headers,
                 header,
-                field(credentials, "token")?.to_string(),
+                credentials.required("token")?.to_string(),
             );
         }
         Auth::Scheme(AuthScheme::None) => {}
     }
     if let Some(sign) = &target.sign {
-        let secret = field(credentials, &sign.secret_field)?;
+        let secret = credentials.required(&sign.secret_field)?;
         let digest = hmac_sha256(secret.as_bytes(), &body);
         set_header(
             &mut headers,
@@ -444,9 +481,9 @@ fn webhook_request(
 fn job_template_request(
     target: &JobTemplateTarget,
     message: &Map<String, Value>,
-    credentials: &HashMap<String, String>,
+    credentials: &Fields,
 ) -> Result<OutboundRequest, String> {
-    let token = field(credentials, "token")?;
+    let token = credentials.required("token")?;
     let event = message.get("event").and_then(Value::as_str).unwrap_or("");
     let mut headers = base_headers(event);
     headers.push(("X-Gitlab-Token".into(), token.to_string()));
@@ -1422,6 +1459,46 @@ mod tests {
         let err = build_request(&bearer, &m, &newline).unwrap_err();
         assert!(err.contains("line break"), "{err}");
         assert!(!err.contains("t0k"), "{err}");
+    }
+
+    // Two credentials with a `token` deliver it under neither's bare name:
+    // the send says the field is shared rather than missing, and a default
+    // auth fails instead of silently sending no Authorization. A field only
+    // one of them has is still read.
+    #[test]
+    fn a_field_two_credentials_share_is_named_shared_not_missing() {
+        let creds = HashMap::from([
+            ("auth_token".to_string(), "a".to_string()),
+            ("sign_token".to_string(), "b".to_string()),
+            ("secret".to_string(), "s".to_string()),
+            ("sign_secret".to_string(), "s".to_string()),
+        ]);
+        let m = outcome_message();
+        for auth in ["", "  auth: bearer\n", "  auth: {header: X-Key}\n"] {
+            let w = webhook(&format!(
+                "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [cred-auth, cred-sign]\n{auth}"
+            ));
+            let err = build_request(&w, &m, &creds).unwrap_err();
+            assert!(
+                err.contains("credentials 'cred-auth', 'cred-sign' all have a 'token' field"),
+                "{auth}: {err}"
+            );
+        }
+        let signed = webhook(
+            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [cred-auth, cred-sign]\n  auth: none\n  sign: {secret_field: token}\n",
+        );
+        let err = build_request(&signed, &m, &creds).unwrap_err();
+        assert!(err.contains("all have a 'token' field"), "{err}");
+        let signed = webhook(
+            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [cred-auth, cred-sign]\n  auth: none\n  sign: {}\n",
+        );
+        assert!(build_request(&signed, &m, &creds).is_ok());
+        // Missing everywhere is still missing.
+        let basic = webhook(
+            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [cred-auth, cred-sign]\n  auth: basic\n",
+        );
+        let err = build_request(&basic, &m, &creds).unwrap_err();
+        assert_eq!(err, "the credential has no 'username' field");
     }
 
     #[test]

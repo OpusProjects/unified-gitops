@@ -50,7 +50,8 @@ reads `LDAP_PASSWORD` and delivers `password`. `secret_keys` maps our names to
 fields of a Vault secret or of the JSON file.
 
 Setting both `env_vars` and `env_prefix` is refused at load, and so is
-`secret_keys` next to `env_vars` without a `vault_path` or `secret_file`.
+`env_vars` beside a `vault_path`, a `secret_file` or `secret_keys`: a
+credential reads from one place.
 
 The older form, `env_prefix` + `secret_keys` (prefix joined to each value with
 `_`), still loads but is deprecated: startup and `--check-config` name the
@@ -70,6 +71,10 @@ another application's values. Each field arrives twice:
 - `CREDENTIAL_<FIELD>`, only when no other declared credential has that field.
   Two credentials with a `password` deliver neither as `CREDENTIAL_PASSWORD`,
   rather than one silently overwriting the other.
+
+An application's credentials must not be delivered under one id
+(`cred-vc-aa1` and `cred_vc_aa1` both become `CREDENTIAL_VC_AA1_*`): that is
+refused at load, and so is the same on a webhook.
 
 `env_vars: {username: D42_USERNAME}` on `cred-d42` reads `D42_USERNAME` and
 delivers `CREDENTIAL_D42_USERNAME` (and `CREDENTIAL_USERNAME` when it is the
@@ -94,7 +99,10 @@ Errors are never cached — a transient backend blip is retried on the next
 resolution instead of being remembered for the TTL.
 
 The deprecated `secrets.cache_ttl_seconds` in `config.yaml`, while set, still
-caches every credential for that long, as it did.
+caches every credential for that long, as it did — and replaces each Vault's
+own cache rather than stacking on it, so a rotation still takes at most that
+long. The deprecated `secrets.vault`, without it, keeps the 60-second cache
+0.3.0 gave it by default.
 
 ---
 

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::domain::app::Application;
-use crate::domain::credential::Credential;
+use crate::domain::credential::{Credential, delivery_id, variable_part};
 use crate::domain::ldap::LdapConfig;
 use crate::domain::project::GitProject;
 use crate::ports::secrets::{SecretsError, SecretsPort};
@@ -67,7 +67,7 @@ fn merge(resolved: Vec<(&String, HashMap<String, String>)>) -> HashMap<String, S
 
     let mut all_credentials = HashMap::new();
     for (credential_id, fields) in resolved {
-        let prefix = format!("{}_", crate::domain::credential::delivery_id(credential_id));
+        let prefix = format!("{}_", delivery_id(credential_id));
         for (field, value) in fields {
             if unique.contains(&field) {
                 all_credentials.insert(field.clone(), value.clone());
@@ -75,8 +75,9 @@ fn merge(resolved: Vec<(&String, HashMap<String, String>)>) -> HashMap<String, S
             // A field already named after its credential (`portainer_url` on
             // cred-portainer, the hand-made form that predates this) is not
             // prefixed twice: a script scanning CREDENTIAL_<SYSTEM>_<SITE>_*
-            // would otherwise find a second, phantom site.
-            let under_id = if field.starts_with(&prefix) {
+            // would otherwise find a second, phantom site. Compared in
+            // variable form, so `PORTAINER_URL` counts as named after it too.
+            let under_id = if variable_part(&field).starts_with(&prefix) {
                 field
             } else {
                 format!("{prefix}{field}")
@@ -190,6 +191,18 @@ mod tests {
         assert_eq!(names, ["portainer_a_url", "portainer_b_url"]);
     }
 
+    // However the hand-made field is written, it is not prefixed again.
+    #[tokio::test]
+    async fn the_no_double_prefix_rule_ignores_case() {
+        let secrets =
+            MockSecrets::new().with("cred-avamar-aa1", [("AVAMAR_AA1_URL", "https://aa1")]);
+        let resolved = resolve_credentials(&secrets, &ids(&["cred-avamar-aa1"]))
+            .await
+            .unwrap();
+        let names: Vec<&String> = resolved.keys().collect();
+        assert_eq!(names, ["AVAMAR_AA1_URL"]);
+    }
+
     #[tokio::test]
     async fn the_id_drops_a_cred_prefix_and_anything_outside_a_z0_9() {
         let secrets = MockSecrets::new()
@@ -224,7 +237,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_same_credential_named_twice_keeps_its_flat_fields() {
+    async fn a_credential_listed_twice_keeps_its_bare_names() {
         let secrets = MockSecrets::new().with("cred-gh", [("token", "t")]);
         let resolved = resolve_credentials(&secrets, &ids(&["cred-gh", "cred-gh"]))
             .await

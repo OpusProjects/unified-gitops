@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::{AppConfig, RestartOnlySettings};
 use crate::{AppState, RuntimeConfig};
@@ -139,6 +139,11 @@ pub fn apply(state: &AppState, cfg: &AppConfig) -> ReloadReport {
         applications_changed = report.applications.total(),
         "Configuration reloaded"
     );
+    // The same notices startup logs: a configuration pushed and reloaded in
+    // a deprecated form would otherwise be told only at the next restart.
+    for note in cfg.deprecations() {
+        warn!("{note}");
+    }
 
     report
 }
