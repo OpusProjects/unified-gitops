@@ -6,13 +6,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-29
+
 ### Added
 
+- A project's last pulls: `history` on each project in `GET /api/v1/projects`, newest first, up to 50, in memory since the process started, as an application's runs are. Each says when it started, how long it took, why (`scheduled`, `manual`, `check` before an application's check or sync, kept only when it moved the commit or failed, `startup`), who asked a manual one (the API key's name or the signed-in user), how it ended, and the commit it found the checkout at and left it at (see `docs/projects.md`).
 - Credentials name their environment variables in full with `env_vars: {<field>: <VAR>}` (`env_vars: {password: LDAP_PASSWORD}` reads `LDAP_PASSWORD` as `password`), and API keys with `env_vars: {key: <VAR>}`; `env_vars` and `env_prefix` on one credential, `env_vars` beside a `vault_path`, `secret_file` or `secret_keys` (a credential reads from one place), an API key `env_vars` field other than `key`, and an API key with both or neither of `env_vars.key` and `env` are refused at load (see `docs/secrets.md`).
 - Every credential field also reaches the connector under its credential's id, `CREDENTIAL_<ID>_<FIELD>` (the name without a leading `cred-`/`cred_`, anything outside `a-z0-9` made `_`: `cred-portainer-ldap`'s `password` is `CREDENTIAL_PORTAINER_LDAP_PASSWORD`), so an application can use two credentials with the same fields; a field no other credential has and already named after its own (`portainer_url` on `cred-portainer`) is not prefixed again, and two values that would still reach one variable fail the run naming both.
-- A project's last pulls: `history` on each project in `GET /api/v1/projects`, newest first, up to 50, in memory since the process started, as an application's runs are. Each says when it started, how long it took, why (`scheduled`, `manual`, `check` before an application's check or sync, kept only when it moved the commit or failed, `startup`), who asked a manual one (the API key's name or the signed-in user), how it ended, and the commit it found the checkout at and left it at (see `docs/projects.md`).
 - A Vault is a credential of `type: vault` (`address`, `mount`, `env_vars: {token: <VAR>}` or `kubernetes_role`, `timeout_seconds`, `cache_ttl_seconds`), as AWX models a Vault lookup; a credential reads from it with `vault: <its name>` and `vault_path`, so several Vaults can coexist, each with its own login and cache. Naming a Vault credential as an application's, project's, webhook's or LDAP bind's credential, a Vault field on another type, and a `vault:` that is not a Vault are refused at load; `GET /api/v1/credentials` adds `vault`, `used_by.credentials` on a Vault lists the credentials reading from it, and `vault_connection` (address, mount, auth, kubernetes_role, token_env, timeout_seconds, cache_ttl_seconds) describes each Vault, null for any other type (see `docs/secrets.md`).
 - A project names its credential with `credentials:`, a list as on every other item (at most one: a clone authenticates once); a project listing more than one, or setting both forms, is refused.
+- The web UI from unified-ui 0.6.0 (was 0.4.0): a History panel on a project's page, an Order menu on every list, cron schedules in words, counts with thousands separators, linked items as tables on each page, Overview cards that hold their place while they load, a Secrets card on Configuration with one row per Vault, and project cards that always show their Credentials (None for a public repository).
 
 ### Changed
 
@@ -70,7 +73,8 @@ First version: GitOps for anything with an API.
 - Configuration as code, one item per file, validated strictly, reloadable live and pushable over the configuration API.
 - API keys and LDAP sign-in, secrets from env or Vault, Prometheus metrics, and the web UI from unified-ui 0.2.0.
 
-[Unreleased]: https://github.com/OpusProjects/unified-gitops/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/OpusProjects/unified-gitops/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/OpusProjects/unified-gitops/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/OpusProjects/unified-gitops/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/OpusProjects/unified-gitops/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/OpusProjects/unified-gitops/releases/tag/v0.1.0
