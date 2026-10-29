@@ -78,6 +78,10 @@ pub struct SyncHealthInfo {
 pub struct RunInfo {
     /// When it started, unix seconds
     pub started_at: u64,
+    /// Seconds since it started, measured on this instance when the answer
+    /// was built: what a client counts a live age from, so its own clock
+    /// being off does not move it (as `sync_health`'s ages)
+    pub age_seconds: u64,
     pub duration_ms: u64,
     /// "scheduled", "manual" (Pull, the API), "check" (before an
     /// application's check or sync) or "startup" (the clones at boot, a
@@ -99,6 +103,7 @@ pub struct RunInfo {
 impl From<crate::domain::sync_health::RunRecord> for RunInfo {
     fn from(run: crate::domain::sync_health::RunRecord) -> Self {
         Self {
+            age_seconds: crate::domain::unix_now().saturating_sub(run.started_at),
             started_at: run.started_at,
             duration_ms: run.duration_ms,
             trigger: run.trigger.name(),

@@ -9,9 +9,18 @@ async fn main() {
     // binds, no scheduler starts, and no secrets are resolved (a CI runner
     // validating YAML has no reason to hold the deployment's env vars).
     // Plain prints rather than tracing: this output is for a human or a CI
-    // log, not for a log pipeline.
-    if std::env::args().skip(1).any(|arg| arg == "--check-config") {
-        let config_dir = std::env::var("CONFIG_DIR").unwrap_or_else(|_| "config".to_string());
+    // log, not for a log pipeline. The directory is the word after the flag,
+    // unless that is another flag; else CONFIG_DIR, else ./config. Reading
+    // only CONFIG_DIR made `--check-config ./myconf` check ./config and say
+    // OK about a directory it never read.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(i) = args.iter().position(|arg| arg == "--check-config") {
+        let config_dir = args
+            .get(i + 1)
+            .filter(|next| !next.starts_with("--"))
+            .cloned()
+            .or_else(|| std::env::var("CONFIG_DIR").ok())
+            .unwrap_or_else(|| "config".to_string());
         match unified_gitops::config::load_config(&config_dir) {
             Ok(cfg) => {
                 // Deprecated forms pass (they still load), but a config

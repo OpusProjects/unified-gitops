@@ -9,6 +9,10 @@ import sys
 
 config = json.loads(os.environ.get("APPLICATION_CONFIG", "{}"))
 child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"])
-with open(config["pidfile"], "w") as f:
+# Written whole or not at all: an empty pidfile read mid-write would name no
+# process, and the test would call that "killed".
+tmp = config["pidfile"] + ".tmp"
+with open(tmp, "w") as f:
     f.write(str(child.pid))
+os.replace(tmp, config["pidfile"])
 child.wait()

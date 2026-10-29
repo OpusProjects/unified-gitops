@@ -80,6 +80,8 @@ pub struct SecretsSettings {
     /// set (a Vault credential now has its own `cache_ttl_seconds`)
     pub cache_ttl_seconds: Option<u64>,
     pub vault: Option<VaultSettings>,
+    /// Whether config.yaml still has the deprecated `secrets:` block
+    pub deprecated: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -145,6 +147,8 @@ pub async fn get_settings(
         },
         secrets: SecretsSettings {
             cache_ttl_seconds: config.secrets.cache_ttl_seconds,
+            deprecated: config.secrets.cache_ttl_seconds.is_some()
+                || config.secrets.vault.is_some(),
             vault: config.secrets.vault.as_ref().map(|v| VaultSettings {
                 address: v.address.clone(),
                 mount: v.mount.clone(),

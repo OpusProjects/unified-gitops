@@ -147,7 +147,8 @@ see [observability](observability.md).
 
 Each pull is also kept in the project's `history`: its last 50, newest first,
 in memory since the process started (a restart starts them over, as it does
-the health). A row says when the pull started and how long it took, why
+the health). A row says when the pull started (`started_at`, and `age_seconds`
+measured on the server, so a client's clock does not move it) and how long it took, why
 (`scheduled`, `manual`, `check` — the pull before an application's check or
 sync — or `startup`), who asked a manual one, how it ended (`error`), and the
 commit it found the checkout at and left it at (`revision_before`,

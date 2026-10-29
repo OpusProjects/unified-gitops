@@ -4,6 +4,7 @@ use crate::domain::app::Application;
 use crate::domain::credential::{Credential, delivery_id, variable_part};
 use crate::domain::ldap::LdapConfig;
 use crate::domain::project::GitProject;
+use crate::domain::webhook::Webhook;
 use crate::ports::secrets::{SecretsError, SecretsPort};
 
 // Resolves a list of credential_ids against the SecretsPort and combines
@@ -47,54 +48,85 @@ pub async fn resolve_credentials(
         }
     }
 
-    Ok(merge(resolved))
+    merge(resolved)
 }
 
-fn merge(resolved: Vec<(&String, HashMap<String, String>)>) -> HashMap<String, String> {
-    // How many credentials carry each field: the flat name is delivered
-    // only where the answer is one.
-    let mut holders: HashMap<&str, usize> = HashMap::new();
+fn merge(
+    resolved: Vec<(&String, HashMap<String, String>)>,
+) -> Result<HashMap<String, String>, SecretsError> {
+    // How many of these credentials have each field, compared as the
+    // variable name it becomes (`TOKEN` and `token` are one CREDENTIAL_TOKEN):
+    // the flat name is delivered only where the answer is one.
+    let mut holders: HashMap<String, usize> = HashMap::new();
     for (_, fields) in &resolved {
         for field in fields.keys() {
-            *holders.entry(field).or_default() += 1;
+            *holders.entry(variable_part(field)).or_default() += 1;
         }
     }
-    let unique: std::collections::HashSet<String> = holders
-        .into_iter()
-        .filter(|(_, n)| *n == 1)
-        .map(|(field, _)| field.to_string())
-        .collect();
 
+    // Every name delivered, keyed by the variable it becomes, with where it
+    // came from: two different values never land on one variable. That is
+    // an error naming both, not a silent last-one-wins.
     let mut all_credentials = HashMap::new();
-    for (credential_id, fields) in resolved {
+    let mut origin: HashMap<String, (String, String)> = HashMap::new();
+    // A closure that mutably borrows the two maps above: it has to be
+    // declared `mut` because calling it changes what it captured.
+    let mut deliver = |name: String, value: &String, credential_id: &str, field: &str| {
+        let variable = variable_part(&name);
+        match origin.get(&variable) {
+            Some((other, other_field)) if other != credential_id || other_field != field => {
+                return Err(SecretsError {
+                    message: format!(
+                        "credentials '{other}' (field '{other_field}') and '{credential_id}' \
+                         (field '{field}') would both reach the connector as CREDENTIAL_{} — \
+                         rename one of the fields",
+                        variable.to_uppercase()
+                    ),
+                });
+            }
+            _ => {}
+        }
+        origin.insert(variable, (credential_id.to_string(), field.to_string()));
+        all_credentials.insert(name, value.clone());
+        Ok(())
+    };
+    for (credential_id, fields) in &resolved {
         let prefix = format!("{}_", delivery_id(credential_id));
         for (field, value) in fields {
-            if unique.contains(&field) {
-                all_credentials.insert(field.clone(), value.clone());
-            }
+            let variable = variable_part(field);
+            let unshared = holders[&variable] == 1;
             // A field already named after its credential (`portainer_url` on
             // cred-portainer, the hand-made form that predates this) is not
             // prefixed twice: a script scanning CREDENTIAL_<SYSTEM>_<SITE>_*
             // would otherwise find a second, phantom site. Compared in
             // variable form, so `PORTAINER_URL` counts as named after it too.
-            let under_id = if variable_part(&field).starts_with(&prefix) {
-                field
-            } else {
-                format!("{prefix}{field}")
-            };
-            all_credentials.insert(under_id, value);
+            // Only an unshared field with something after the prefix:
+            // `ssh_key_path` on cred-ssh, shared with another credential, is
+            // a field like any other.
+            let hand_made =
+                unshared && variable.len() > prefix.len() && variable.starts_with(&prefix);
+            if hand_made {
+                deliver(field.clone(), value, credential_id, field)?;
+                continue;
+            }
+            deliver(format!("{prefix}{field}"), value, credential_id, field)?;
+            if unshared {
+                deliver(field.clone(), value, credential_id, field)?;
+            }
         }
     }
-    all_credentials
+    Ok(all_credentials)
 }
 
 // What names a credential in its configuration: the applications that pass it
-// to their connector, the projects that clone with it, the directory login's
-// service account, and, for a Vault, the credentials reading from it. Sorted, so a page and a diff of it are stable.
+// to their connector, the projects that clone with it, the webhooks that send
+// with it, the directory login's service account, and, for a Vault, the
+// credentials reading from it. Sorted, so a page and a diff of it are stable.
 pub struct CredentialUsers {
     pub credentials: Vec<String>,
     pub applications: Vec<String>,
     pub projects: Vec<String>,
+    pub webhooks: Vec<String>,
     pub ldap: bool,
 }
 
@@ -103,6 +135,7 @@ pub fn users_of(
     credentials: &HashMap<String, Credential>,
     applications: &HashMap<String, Application>,
     projects: &HashMap<String, GitProject>,
+    webhooks: &HashMap<String, Webhook>,
     ldap: Option<&LdapConfig>,
 ) -> CredentialUsers {
     let mut app_ids: Vec<String> = applications
@@ -117,6 +150,14 @@ pub fn users_of(
         .map(|(id, _)| id.clone())
         .collect();
     project_ids.sort();
+    // Without these, a credential only a webhook sends with looked unused,
+    // and safe to remove.
+    let mut webhook_ids: Vec<String> = webhooks
+        .iter()
+        .filter(|(_, webhook)| webhook.credentials().iter().any(|c| c == credential_id))
+        .map(|(id, _)| id.clone())
+        .collect();
+    webhook_ids.sort();
     // A Vault's users are the credentials reading from it (their `vault:`).
     let mut credential_ids: Vec<String> = credentials
         .iter()
@@ -128,6 +169,7 @@ pub fn users_of(
         credentials: credential_ids,
         applications: app_ids,
         projects: project_ids,
+        webhooks: webhook_ids,
         ldap: ldap.is_some_and(|l| l.bind_credential == credential_id),
     }
 }
@@ -236,6 +278,46 @@ mod tests {
         assert_eq!(resolved["username"], "admin");
     }
 
+    // A shared field is a field like any other, even when its name happens
+    // to start with the credential's id: never handed out bare.
+    #[tokio::test]
+    async fn a_shared_field_starting_with_its_id_is_still_prefixed() {
+        let secrets = MockSecrets::new()
+            .with("cred-ssh", [("ssh_key_path", "/a")])
+            .with("cred-ssh-dc4", [("ssh_key_path", "/b")]);
+        let resolved = resolve_credentials(&secrets, &ids(&["cred-ssh", "cred-ssh-dc4"]))
+            .await
+            .unwrap();
+        assert!(!resolved.contains_key("ssh_key_path"));
+        assert_eq!(resolved["ssh_ssh_key_path"], "/a");
+        assert_eq!(resolved["ssh_dc4_ssh_key_path"], "/b");
+    }
+
+    // Two values that would reach one variable fail the resolution, naming
+    // both, instead of one silently winning.
+    #[tokio::test]
+    async fn two_values_on_one_variable_are_an_error() {
+        let secrets = MockSecrets::new()
+            .with("cred-avamar", [("aa1_url", "old")])
+            .with("cred-avamar-aa1", [("url", "new")]);
+        let err = resolve_credentials(&secrets, &ids(&["cred-avamar", "cred-avamar-aa1"]))
+            .await
+            .unwrap_err();
+        assert!(
+            err.message.contains("CREDENTIAL_AVAMAR_AA1_URL"),
+            "{}",
+            err.message
+        );
+
+        let secrets = MockSecrets::new()
+            .with("cred-a", [("TOKEN", "1")])
+            .with("cred-b", [("token", "2")]);
+        let resolved = resolve_credentials(&secrets, &ids(&["cred-a", "cred-b"]))
+            .await
+            .unwrap();
+        assert!(!resolved.contains_key("token") && !resolved.contains_key("TOKEN"));
+    }
+
     #[tokio::test]
     async fn a_credential_listed_twice_keeps_its_bare_names() {
         let secrets = MockSecrets::new().with("cred-gh", [("token", "t")]);
@@ -260,6 +342,41 @@ mod tests {
             "error was: {}",
             err.message
         );
+    }
+
+    // A credential only a webhook sends with is used, not unused.
+    #[test]
+    fn a_webhook_s_credential_is_used_by_it() {
+        let webhook = |yaml: &str| -> Webhook { serde_saphyr::from_str(yaml).unwrap() };
+        let webhooks = HashMap::from([
+            (
+                "ntf-b".to_string(),
+                webhook(
+                    "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n  credentials: [cred-hook]\n",
+                ),
+            ),
+            (
+                "ntf-a".to_string(),
+                webhook(
+                    "type: ascender\nevents: [sync_failed]\nascender:\n  url: https://a.example.com\n  job_template: 1\n  credentials: [cred-hook]\n",
+                ),
+            ),
+            (
+                "ntf-c".to_string(),
+                webhook(
+                    "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n",
+                ),
+            ),
+        ]);
+        let users = users_of(
+            "cred-hook",
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &webhooks,
+            None,
+        );
+        assert_eq!(users.webhooks, ["ntf-a", "ntf-b"]);
     }
 
     // A Vault is used by the credentials reading from it, not unused.
@@ -289,12 +406,14 @@ mod tests {
             &credentials,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             None,
         );
         assert_eq!(users.credentials, ["cred-a", "cred-b"]);
         let users = users_of(
             "cred-a",
             &credentials,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             None,

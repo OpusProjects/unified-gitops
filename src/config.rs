@@ -615,7 +615,21 @@ impl AppConfig {
                 &format!("Webhook '{id}'"),
                 webhook.credentials(),
             ));
-            errors.extend(self.shared_field_errors(id, webhook.credentials()));
+            errors.extend(self.shared_field_errors(id, webhook));
+        }
+
+        // The deprecated config.yaml Vault: a 0 bound fails every request.
+        if self
+            .secrets_config
+            .vault
+            .as_ref()
+            .is_some_and(|v| v.timeout_seconds == 0)
+        {
+            errors.push(
+                "secrets.vault.timeout_seconds 0 would fail every request to that Vault — \
+                 give it a bound in seconds (default 10)"
+                    .to_string(),
+            );
         }
 
         for (id, credential) in &self.credentials {
@@ -697,20 +711,42 @@ impl AppConfig {
         notices
     }
 
-    // A webhook reads its credentials' fields by their bare names only
-    // (`token`, `username`, `password`, the signing secret), and a field two
-    // of them have is delivered under neither bare name: a default auth would
-    // silently send no Authorization, and bearer, header, basic or a
-    // signature would fail at every send for a field that seems to be there.
+    // A webhook reads some of its credentials' fields by their bare names
+    // (Webhook::bare_fields: `token`, or `username` and `password`, and the
+    // signing secret's field), and a field two of them have is delivered
+    // under neither bare name: a default auth would silently send no
+    // Authorization, and bearer, header, basic or a signature would fail at
+    // every send for a field that seems to be there. Only those fields are
+    // checked (any other the credentials share is never read by name), and
+    // compared as the variable they become, so `Token` and `token` are one.
     // Refused where the configuration says which fields a credential has.
-    fn shared_field_errors(&self, id: &str, credential_ids: &[String]) -> Vec<String> {
+    fn shared_field_errors(&self, id: &str, webhook: &Webhook) -> Vec<String> {
+        use crate::domain::credential::variable_part;
+        let read: Vec<String> = webhook
+            .bare_fields()
+            .into_iter()
+            .map(variable_part)
+            .collect();
         let mut holders: std::collections::BTreeMap<String, Vec<&String>> = Default::default();
         let mut seen = std::collections::HashSet::new();
-        for cred_id in credential_ids.iter().filter(|c| seen.insert(c.as_str())) {
+        for cred_id in webhook
+            .credentials()
+            .iter()
+            .filter(|c| seen.insert(c.as_str()))
+        {
             let Some(credential) = self.credentials.get(cred_id) else {
                 continue;
             };
-            for field in credential.declared_fields() {
+            // A credential holding `token` and `TOKEN` is still one holder.
+            let mut fields: Vec<String> = credential
+                .declared_fields()
+                .iter()
+                .map(|f| variable_part(f))
+                .filter(|f| read.contains(f))
+                .collect();
+            fields.sort();
+            fields.dedup();
+            for field in fields {
                 holders.entry(field).or_default().push(cred_id);
             }
         }
@@ -1183,6 +1219,62 @@ mod tests {
         assert!(!err.contains("Webhook 'v'"), "{err}");
     }
 
+    // Only the fields the webhook reads by bare name are checked, compared
+    // as the variable they become: a shared field it never reads loads, and
+    // `Token` beside `token` is the same field.
+    #[test]
+    fn a_webhook_s_shared_field_check_covers_only_what_it_reads() {
+        let creds = "credentials:\n  - name: cred-a\n    type: username_password\n    env_vars:\n      username: A_USER\n      token: A_TOKEN\n      url: A_URL\n  - name: cred-b\n    type: username_password\n    env_vars:\n      password: B_PASS\n      Token: B_TOKEN\n      url: B_URL\n";
+        let webhook = |name: &str, extra: &str| {
+            format!(
+                "webhooks:\n  - name: {name}\n    type: webhook\n    events: [sync_failed]\n    applications: [portainer]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-a, cred-b]\n{extra}"
+            )
+        };
+        let base = |file: &str, yaml: String| {
+            dir_with(&[
+                ("connectors/kv.yaml", CONNECTOR),
+                ("projects.yaml", PROJECT),
+                ("applications/portainer.yaml", APPLICATION),
+                ("credentials.yaml", creds),
+                (file, &yaml),
+            ])
+        };
+
+        // Basic reads username and password, which only one of them has
+        // each: the shared `url` and `token`/`Token` are never read.
+        let dir = base(
+            "webhooks/basic.yaml",
+            webhook("basic", "      auth: basic\n"),
+        );
+        load_config(dir.path().to_str().unwrap()).expect("loads");
+
+        // Bearer reads `token`, which both have, one written `Token`.
+        let dir = base(
+            "webhooks/bearer.yaml",
+            webhook("bearer", "      auth: bearer\n"),
+        );
+        let err = load_err(&dir);
+        assert!(
+            err.contains(
+                "Webhook 'bearer' uses credentials 'cred-a', 'cred-b' that all have a 'token' field"
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("'url' field"), "{err}");
+
+        // No auth reads no `token`; a signature reads its own field.
+        let dir = base(
+            "webhooks/signed.yaml",
+            webhook(
+                "signed",
+                "      auth: none\n      sign: {secret_field: url}\n",
+            ),
+        );
+        let err = load_err(&dir);
+        assert!(err.contains("all have a 'url' field"), "{err}");
+        assert!(!err.contains("'token' field"), "{err}");
+    }
+
     #[test]
     fn webhooks_load_as_items() {
         let dir = dir_with(&[
@@ -1628,6 +1720,11 @@ mod tests {
             ]
         );
 
+        // One credential listed twice is still one.
+        let dir = base("    credentials:\n      - cred-gh\n      - cred-gh\n");
+        let cfg = load_config(dir.path().to_str().unwrap()).expect("loads");
+        assert_eq!(cfg.projects["prj-test"].credential_id(), Some("cred-gh"));
+
         let dir =
             base("    credentials:\n      - cred-gh\n      - cred-two\n    credential: cred-gh\n");
         let err = load_err(&dir);
@@ -1652,5 +1749,15 @@ mod tests {
             notes[0].contains("the secrets block is deprecated"),
             "{notes:?}"
         );
+    }
+
+    #[test]
+    fn the_deprecated_secrets_vault_with_a_zero_timeout_is_refused() {
+        let dir = dir_with(&[(
+            "config.yaml",
+            "server:\n  host: \"127.0.0.1\"\n  port: 9090\nsecrets:\n  vault:\n    address: https://vault.example\n    timeout_seconds: 0\n",
+        )]);
+        let err = load_err(&dir);
+        assert!(err.contains("secrets.vault.timeout_seconds 0"), "{err}");
     }
 }

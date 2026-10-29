@@ -375,6 +375,30 @@ impl Webhook {
         }
     }
 
+    // The credential fields a send reads by their bare names, and only those
+    // (application::webhooks): `token` for a bearer, default or header auth
+    // and for a job template's key, `username` and `password` for basic,
+    // and the signing secret's field. Any other field the credentials share
+    // is never read here, so it does not matter that it loses its bare name.
+    pub fn bare_fields(&self) -> Vec<&str> {
+        let Some(target) = &self.webhook else {
+            return if self.credentials().is_empty() {
+                Vec::new()
+            } else {
+                vec!["token"]
+            };
+        };
+        let mut fields = match &target.auth {
+            Auth::Scheme(AuthScheme::Bearer) | Auth::Default | Auth::Header(_) => vec!["token"],
+            Auth::Scheme(AuthScheme::Basic) => vec!["username", "password"],
+            Auth::Scheme(AuthScheme::None) => Vec::new(),
+        };
+        if let Some(sign) = &target.sign {
+            fields.push(sign.secret_field.as_str());
+        }
+        fields
+    }
+
     // Whether this webhook wants `event` from `application`, which reads
     // from `project`.
     pub fn wants(&self, event: Event, application: &str, project: &str) -> bool {

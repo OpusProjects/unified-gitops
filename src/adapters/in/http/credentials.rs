@@ -64,6 +64,9 @@ pub struct VaultConnectionInfo {
     /// The variable holding its token, for token auth
     pub token_env: Option<String>,
     pub timeout_seconds: u64,
+    /// How long a value read from this Vault is reused, as in effect: the
+    /// deprecated config.yaml `secrets.cache_ttl_seconds` while it is set,
+    /// else this Vault's own (default 60). 0 = no cache
     pub cache_ttl_seconds: u64,
 }
 
@@ -80,6 +83,8 @@ pub struct CredentialUsersInfo {
     /// Applications whose connector receives it
     pub applications: Vec<String>,
     pub projects: Vec<String>,
+    /// Webhooks that send with it
+    pub webhooks: Vec<String>,
     /// Whether the LDAP login's service account binds with it
     pub ldap: bool,
 }
@@ -110,6 +115,7 @@ pub async fn list_credentials(
             &config.credentials,
             &config.applications,
             &config.projects,
+            &config.webhooks,
             config.ldap.as_ref(),
         );
 
@@ -148,7 +154,12 @@ pub async fn list_credentials(
                 kubernetes_role: credential.kubernetes_role.clone(),
                 token_env: credential.env_vars.get("token").cloned(),
                 timeout_seconds: credential.timeout_seconds.unwrap_or(10),
-                cache_ttl_seconds: credential.cache_ttl_seconds.unwrap_or(60),
+                // The cache in effect: the deprecated config.yaml one
+                // replaces each Vault's own while it is set.
+                cache_ttl_seconds: config
+                    .secrets
+                    .cache_ttl_seconds
+                    .unwrap_or_else(|| credential.cache_ttl_seconds.unwrap_or(60)),
             });
 
         credentials.push(CredentialInfo {
@@ -168,6 +179,7 @@ pub async fn list_credentials(
                 credentials: users.credentials,
                 applications: users.applications,
                 projects: users.projects,
+                webhooks: users.webhooks,
                 ldap: users.ldap,
             },
             vault_connection,

@@ -55,8 +55,10 @@ published and credited unless you prefer otherwise.
   applications with `auto_sync: false` and `prune: false`.
 - Credentials are never stored by the service; they are resolved at the start of each run
   from environment variables, files, or Vault (KV v2, token or Kubernetes
-  auth), passed to scripts via their environment, and held only in a short
-  in-memory resolution cache (`secrets.cache_ttl_seconds`, default 60).
+  auth), passed to scripts via their environment. Environment and file
+  credentials are read on every use; a value read from Vault is held in a
+  short in-memory cache (the Vault credential's `cache_ttl_seconds`, default
+  60).
 - There is **no rate limiting** on authentication attempts — a deliberate
   trade for the trusted-network posture. Front the service with a proxy if
   your deployment needs it.
