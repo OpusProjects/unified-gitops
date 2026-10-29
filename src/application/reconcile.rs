@@ -275,7 +275,7 @@ async fn export_tree(
         std::time::Duration::from_secs(project.timeout_seconds),
         r.git.export(
             &checkout,
-            project,
+            &project.remote(),
             &credentials,
             revision,
             app.folder(),

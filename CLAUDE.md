@@ -113,9 +113,15 @@ layer). The modules that held them re-export them under their old paths; what st
 that code in the auth repository, release it, then move both services to the new tag in a `build:` PR
 (`cargo update -p unified-secrets -p unified-auth`); never patch a copy here. To try a change first,
 use an uncommitted `[patch."https://github.com/OpusProjects/auth"]` pointing at a local
-checkout. `deny.toml` allows exactly this git source.
+checkout. `deny.toml` allows exactly these git sources (auth and git).
 
-Git/projects, process env, scheduler basics, the config API, metrics plumbing
+Git checkouts come the same way from [git](https://github.com/OpusProjects/git)'s `unified-git` crate:
+`GitPort`, `Remote`, `Commit`, `CommitRange` and `CliGit` (clone, pull, revision, tree, commits,
+export), and `without_userinfo` / `redact_userinfo`, re-exported from `ports::git`,
+`adapters::out::git::cli` and `domain::project`. `GitProject::remote()` is what a project hands to git;
+when to pull, the per-checkout lock, webhooks and sync health stay in `application/projects.rs`.
+
+Project pulls, process env, scheduler basics, the config API, metrics plumbing
 and UI serving are still the same code as unified-api's, copied: fix a bug in one, check the other.
 
 ## Releasing

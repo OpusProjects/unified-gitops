@@ -250,7 +250,7 @@ async fn run(
     let started = std::time::Instant::now();
     let pulled = match tokio::time::timeout(
         std::time::Duration::from_secs(project.timeout_seconds),
-        git.ensure(&dir, project, &credentials),
+        git.ensure(&dir, &project.remote(), &credentials),
     )
     .await
     {
@@ -339,7 +339,7 @@ async fn commits(
         std::time::Duration::from_secs(project.timeout_seconds),
         git.commits(
             dir,
-            project,
+            &project.remote(),
             credentials,
             from,
             to,
@@ -430,7 +430,7 @@ mod tests {
         fn ensure(
             &self,
             _dir: &Path,
-            _project: &GitProject,
+            _remote: &unified_git::Remote,
             _credentials: &HashMap<String, String>,
         ) -> GitFuture<'_> {
             let fail_with = self.fail_with.clone();
@@ -450,7 +450,7 @@ mod tests {
         fn ensure(
             &self,
             _dir: &Path,
-            _project: &GitProject,
+            _remote: &unified_git::Remote,
             _credentials: &HashMap<String, String>,
         ) -> GitFuture<'_> {
             Box::pin(std::future::pending())
@@ -592,7 +592,7 @@ mod tests {
         fn ensure(
             &self,
             _dir: &Path,
-            _project: &GitProject,
+            _remote: &unified_git::Remote,
             _credentials: &HashMap<String, String>,
         ) -> GitFuture<'_> {
             use std::sync::atomic::Ordering::SeqCst;
@@ -668,7 +668,7 @@ mod tests {
         fn ensure(
             &self,
             _dir: &Path,
-            _project: &GitProject,
+            _remote: &unified_git::Remote,
             _credentials: &HashMap<String, String>,
         ) -> GitFuture<'_> {
             *self.at.lock().unwrap() = "bbb";
@@ -727,7 +727,7 @@ mod tests {
         fn ensure(
             &self,
             _dir: &Path,
-            _project: &GitProject,
+            _remote: &unified_git::Remote,
             _credentials: &HashMap<String, String>,
         ) -> GitFuture<'_> {
             Box::pin(async move {

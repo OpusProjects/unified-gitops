@@ -21,14 +21,16 @@ so a reload in the middle of a run cannot mix an old application with a new conn
 ## Shared with unified-api
 
 unified-gitops started as a copy of unified-api 0.34.0 with the inventory removed. Credential resolution,
-LDAP sign-in, API keys and browser sessions now come from [auth](https://github.com/OpusProjects/auth), pinned by
-tag in `Cargo.toml`, and are re-exported under their old module paths:
+LDAP sign-in, API keys and browser sessions now come from [auth](https://github.com/OpusProjects/auth), and git
+checkouts from [git](https://github.com/OpusProjects/git), pinned by tag in `Cargo.toml` and re-exported under
+their old module paths:
 
 | Crate             | What it provides                                             | Re-exported here as |
 | ----------------- | ------------------------------------------------------------ | ------------------- |
 | `unified-secrets` | `Credential`, `SecretsPort`, env and Vault adapters, cache, `build_chain` | `domain::credential`, `ports::secrets`, `adapters::out::secrets` |
 | `unified-auth`    | `DirectoryPort`, `LdapDirectory`, `LdapConfig<R>`, the login use case | `ports::directory`, `adapters::out::directory`, `application::login` |
 | `unified-auth` (`http`) | API key registry and middleware, session store, CSRF, form layer | `adapters::in::http::auth`, `adapters::in::http::session` |
+| `unified-git`     | `GitPort`, `CliGit`: clone, pull, commits, export, address redaction | `ports::git`, `adapters::out::git::cli`, `domain::project` |
 
 What stays here is this service's own: the load-time checks on a credential (`CredentialRules`) and
 the access rule type (`applications`) with what it grants, `Permissions`, how api_keys.yaml becomes keys
@@ -38,7 +40,7 @@ as unified-api's, copied, and should stay the same:
 | Part               | Where                                                       |
 | ------------------ | ----------------------------------------------------------- |
 | Running scripts    | `adapters/out/process_env.rs`, `python.rs` (scrubbed env, venvs) |
-| Git checkouts      | `adapters/out/git`, `application/projects.rs`               |
+| Project pulls      | `application/projects.rs` (when to pull, the lock, sync health) |
 | Scheduler basics   | jitter, backoff, panic supervisor, reload generations       |
 | HTTP conventions   | `ApiError`, health shapes, metrics recorder, CORS, body limit |
 | Sign-in pages      | the login page, the Users page                              |
