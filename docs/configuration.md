@@ -41,7 +41,8 @@ as startup does, and exits.
   types. A `name` defined twice is an error naming both files.
 - **`name` is the identity**: what other items reference, what the API and the state
   directory use. Letters, digits, `-`, `_` and `.`. `description` is optional, for people.
-- **References drop the `_id`:** `connector`, `project`, `credential`, `credentials`.
+- **References drop the `_id`:** `connector`, `project`, `credentials` (a list everywhere; a
+  project's holds at most one, and its singular `credential:` still loads, deprecated).
 - Hidden files and folders are skipped; symlinks are followed (a ConfigMap mount is links).
 - A path may only use letters, digits, `-`, `_` and `.` in each segment.
 
@@ -130,7 +131,7 @@ projects:
     description: "Desired state"
     git_url: "https://github.example.com/ops/desired-state.git"
     branch: main                       # default main
-    credential: cred-github            # private repos: token or ssh_key credential
+    credentials: [cred-github]         # private repos: one token or ssh_key credential
     sync_interval_seconds: 1800        # periodic pull; an application also pulls before each check
     # schedule: "0 * * * *"            # cron (UTC) instead of the interval
     timeout_seconds: 300

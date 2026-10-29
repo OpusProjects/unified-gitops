@@ -112,7 +112,7 @@ pub fn users_of(
     app_ids.sort();
     let mut project_ids: Vec<String> = projects
         .iter()
-        .filter(|(_, project)| project.credential.as_deref() == Some(credential_id))
+        .filter(|(_, project)| project.credential_id() == Some(credential_id))
         .map(|(id, _)| id.clone())
         .collect();
     project_ids.sort();
