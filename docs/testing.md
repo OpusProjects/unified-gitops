@@ -28,4 +28,4 @@ directories for checkouts and state, and call the router as a service rather tha
 - A rule about desired state or the diff: a unit test next to it in `domain/`.
 - Something a person or pipeline does over the API: `tests/reconcile_test.rs`, through the router.
 - A connector's behaviour: test the connector script on its own (see docs/connectors.md); the core's tests
-  use the scripts in `tests/connectors/` (`kv.py` and the SDK are copies from unified-connectors).
+  use the scripts in `tests/connectors/` (`kv.py` and the SDK are copies from the connectors repository).

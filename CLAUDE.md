@@ -6,7 +6,7 @@ GitOps for anything with an API, written in Rust. Pulls desired state (YAML) fro
 compares it with what each live system has, and applies the difference through connector scripts — the
 way Argo CD does for Kubernetes, for Isilons, Ascender, AnsibleForms, InfiniBox and the like.
 Sister project of [unified-api](https://github.com/OpusProjects/unified-api), from whose 0.34.0 code
-it started; the web UI is unified-ui's `apps/unified-gitops`.
+it started; the web UI is the ui repository's `apps/unified-gitops`.
 
 ## Organization
 
@@ -18,7 +18,7 @@ it started; the web UI is unified-ui's `apps/unified-gitops`.
 
 Rust (edition 2024), axum, tokio, serde + serde_json + serde-saphyr (reads config and desired
 state, writes the state copy), utoipa (OpenAPI), metrics + metrics-exporter-prometheus, and
-[unified-auth](https://github.com/OpusProjects/unified-auth)'s `unified-secrets` and `unified-auth` crates.
+[auth](https://github.com/OpusProjects/auth)'s `unified-secrets` and `unified-auth` crates.
 
 ## Build & run
 
@@ -68,7 +68,7 @@ src/
         ├── webhooks/http.rs    # HttpSenderPort → reqwest (no redirects followed)
         ├── git/, secrets/, directory/, config/, python.rs, process_env.rs
 tests/                        # integration tests; tests/connectors/ holds test connector scripts
-                              #   (kv.py + the SDK, copied from unified-connectors)
+                              #   (kv.py + the SDK, copied from the connectors repository)
 ```
 
 ## Architecture
@@ -104,15 +104,15 @@ parsed strictly (`deny_unknown_fields`); restart-only keys are named in `Restart
 ## Shared code with unified-api
 
 Credential resolution, LDAP sign-in, API keys and browser sessions come from
-[unified-auth](https://github.com/OpusProjects/unified-auth), pinned by tag in `Cargo.toml`:
+[auth](https://github.com/OpusProjects/auth), pinned by tag in `Cargo.toml`:
 `unified-secrets` (Credential, SecretsPort, env and Vault adapters, cache, `build_chain`,
 `SecretsConfig`) and `unified-auth` (DirectoryPort, LdapDirectory, `LdapConfig<R>`, the login use case
 and throttle, and its `http` module: API key registry and middleware, session store, CSRF, the form
 layer). The modules that held them re-export them under their old paths; what stays here is
 `CredentialRules` (load-time checks), the access rule type (`applications`) and its `grant_for`. Fix
-that code in unified-auth, release it, then move both services to the new tag in a `build:` PR
+that code in the auth repository, release it, then move both services to the new tag in a `build:` PR
 (`cargo update -p unified-secrets -p unified-auth`); never patch a copy here. To try a change first,
-use an uncommitted `[patch."https://github.com/OpusProjects/unified-auth"]` pointing at a local
+use an uncommitted `[patch."https://github.com/OpusProjects/auth"]` pointing at a local
 checkout. `deny.toml` allows exactly this git source.
 
 Git/projects, process env, scheduler basics, the config API, metrics plumbing

@@ -21,7 +21,7 @@ so a reload in the middle of a run cannot mix an old application with a new conn
 ## Shared with unified-api
 
 unified-gitops started as a copy of unified-api 0.34.0 with the inventory removed. Credential resolution,
-LDAP sign-in, API keys and browser sessions now come from [unified-auth](https://github.com/OpusProjects/unified-auth), pinned by
+LDAP sign-in, API keys and browser sessions now come from [auth](https://github.com/OpusProjects/auth), pinned by
 tag in `Cargo.toml`, and are re-exported under their old module paths:
 
 | Crate             | What it provides                                             | Re-exported here as |

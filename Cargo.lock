@@ -2416,7 +2416,7 @@ checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 [[package]]
 name = "unified-auth"
 version = "0.2.0"
-source = "git+https://github.com/OpusProjects/unified-auth?tag=v0.2.0#6276741f7324e7b73ac239b5af018f58cd9c772d"
+source = "git+https://github.com/OpusProjects/auth?tag=v0.2.0#6276741f7324e7b73ac239b5af018f58cd9c772d"
 dependencies = [
  "axum",
  "dashmap",
@@ -2465,7 +2465,7 @@ dependencies = [
 [[package]]
 name = "unified-secrets"
 version = "0.2.0"
-source = "git+https://github.com/OpusProjects/unified-auth?tag=v0.2.0#6276741f7324e7b73ac239b5af018f58cd9c772d"
+source = "git+https://github.com/OpusProjects/auth?tag=v0.2.0#6276741f7324e7b73ac239b5af018f58cd9c772d"
 dependencies = [
  "reqwest",
  "serde",
