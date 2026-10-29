@@ -2415,13 +2415,17 @@ checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "unified-auth"
-version = "0.1.0"
-source = "git+https://github.com/OpusProjects/unified-auth?tag=v0.1.0#d199a186716faf2caf3a4023f10debbbfee665e5"
+version = "0.2.0"
+source = "git+https://github.com/OpusProjects/unified-auth?tag=v0.2.0#6276741f7324e7b73ac239b5af018f58cd9c772d"
 dependencies = [
+ "axum",
+ "dashmap",
+ "getrandom 0.4.3",
  "ldap3",
  "rustls",
  "rustls-pki-types",
  "serde",
+ "subtle",
  "tokio",
  "tracing",
  "unified-secrets",
@@ -2437,7 +2441,6 @@ dependencies = [
  "croner",
  "dashmap",
  "futures",
- "getrandom 0.4.3",
  "http-body-util",
  "libc",
  "metrics",
@@ -2447,7 +2450,6 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "sha2",
- "subtle",
  "tempfile",
  "tokio",
  "tower",
@@ -2462,8 +2464,8 @@ dependencies = [
 
 [[package]]
 name = "unified-secrets"
-version = "0.1.0"
-source = "git+https://github.com/OpusProjects/unified-auth?tag=v0.1.0#d199a186716faf2caf3a4023f10debbbfee665e5"
+version = "0.2.0"
+source = "git+https://github.com/OpusProjects/unified-auth?tag=v0.2.0#6276741f7324e7b73ac239b5af018f58cd9c772d"
 dependencies = [
  "reqwest",
  "serde",

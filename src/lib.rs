@@ -222,6 +222,7 @@ impl AppBuilder {
     pub fn api_key(mut self, api_key: Option<String>) -> Self {
         if let Some(secret) = api_key {
             self.api_keys.push(ResolvedApiKey {
+                id: "default".to_string(),
                 name: "default".to_string(),
                 secret,
                 permissions: Permissions::Admin,

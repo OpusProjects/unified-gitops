@@ -91,6 +91,7 @@ fn app_home(ldap: Option<LdapConfig>, home: &str) -> axum::Router {
         // With keys configured the API is not open, so a session is the only
         // way these requests authenticate.
         .api_keys(vec![ResolvedApiKey {
+            id: "AWX".to_string(),
             name: "AWX".to_string(),
             secret: "awx-secret".to_string(),
             permissions: Permissions::Admin,
@@ -505,6 +506,7 @@ async fn a_session_reads_protected_metrics() {
         )))
         .directory(Arc::new(Directory))
         .api_keys(vec![ResolvedApiKey {
+            id: "AWX".to_string(),
             name: "AWX".to_string(),
             secret: "awx-secret".to_string(),
             permissions: Permissions::Admin,
