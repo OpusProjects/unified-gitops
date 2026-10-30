@@ -123,9 +123,13 @@ when to pull, the per-checkout lock, webhooks and sync health stay in `applicati
 
 The web layer comes the same way from [web](https://github.com/OpusProjects/web)'s `web-rs` crate:
 `ApiError`/`ErrorBody` (`http::error`), `audit::record`, the web UI serving (`http::ui_assets`, fixed to
-`Permissions`) and the route help the browsable pages read from the OpenAPI document (`http::spec`).
+`Permissions`), the route help the browsable pages read from the OpenAPI document (`http::spec`), and the
+config API: the store (`FsConfigStore`, built with this service's loader by `fs_store`), the file rules
+and every config route's logic. `http/config.rs` keeps the route functions, `ConfigSummary`,
+`ReloadInfo` and a `ConfigHost` (what a reload does). Move to a new release with
+`cargo update -p web-rs` in a `build:` PR.
 
-Project pulls, process env, scheduler basics, the config API, metrics plumbing and the
+Project pulls, process env, scheduler basics, metrics plumbing and the
 browsable pages are still the same code as unified-api's, copied: fix a bug in one, check the other.
 
 ## Releasing
