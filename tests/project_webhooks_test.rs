@@ -12,8 +12,8 @@ use unified_gitops::ports::http_sender::{
 };
 
 // Project webhooks through the real router and a real repository over
-// file://: a pull that brings a commit sends commit_pulled with the
-// applications it touched; a pull that fails sends pull_failed once, however
+// file://: a pull that brings a commit sends commit_pulled with the files
+// it touched; a pull that fails sends pull_failed once, however
 // many times it fails; the first pull that works again sends pull_recovered.
 
 #[derive(Default)]
@@ -111,14 +111,7 @@ async fn a_project_tells_its_commits_its_failures_and_its_recovery() {
     )
     .await;
     let projects = tempfile::tempdir().unwrap();
-    let state = tempfile::tempdir().unwrap();
 
-    let app_at = |path: &str| -> unified_gitops::domain::app::Application {
-        serde_saphyr::from_str(&format!(
-            "connector: kv\nproject: prj-state\npath: {path}\n"
-        ))
-        .unwrap()
-    };
     let project: unified_gitops::domain::project::GitProject = serde_saphyr::from_str(&format!(
         "description: Desired state\ngit_url: file://{}\n",
         origin.display()
@@ -128,26 +121,15 @@ async fn a_project_tells_its_commits_its_failures_and_its_recovery() {
         "type: webhook\nevents: [commit_pulled, pull_failed, pull_recovered]\nprojects: [prj-state]\nwebhook:\n  url: https://hooks.example.com/x\n  retries: 0\n",
     )
     .unwrap();
-    let connector: unified_gitops::domain::connector::Connector = serde_saphyr::from_str(&format!(
-        "path: {}/tests/connectors/kv.py\n",
-        env!("CARGO_MANIFEST_DIR")
-    ))
-    .unwrap();
 
     let recorder = Arc::new(Recorder::default());
     let (app, app_state) = unified_gitops::AppBuilder::new()
-        .applications(HashMap::from([
-            ("app-demo".to_string(), app_at("apps/demo")),
-            ("app-other".to_string(), app_at("apps/other")),
-        ]))
-        .connectors(HashMap::from([("kv".to_string(), connector)]))
         .projects(
             HashMap::from([("prj-state".to_string(), project)]),
             projects.path().to_path_buf(),
         )
         .webhooks(HashMap::from([("hook".to_string(), hook)]))
         .http(recorder.clone())
-        .state_dir(state.path().to_path_buf())
         .api_key(Some("admin-secret".into()))
         .build_with_state();
     app_state.start_webhooks();
@@ -157,7 +139,7 @@ async fn a_project_tells_its_commits_its_failures_and_its_recovery() {
     let (status, body) = call(&app, "POST", sync).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
-    // Two commits, one of them to app-demo's folder.
+    // Two commits, to two files.
     commit(&origin, "README.md", "hello\n", "docs").await;
     commit(
         &origin,
@@ -172,7 +154,6 @@ async fn a_project_tells_its_commits_its_failures_and_its_recovery() {
     let m = &sent[0];
     assert_eq!(m["event"], "commit_pulled");
     assert_eq!(m["project"], "prj-state");
-    assert_eq!(m["application"], Value::Null);
     assert_eq!(m["description"], "Desired state");
     assert_eq!(m["webhook"], "hook");
     assert_eq!(m["commits"][0]["message"], "add a");
@@ -182,7 +163,14 @@ async fn a_project_tells_its_commits_its_failures_and_its_recovery() {
     assert_ne!(m["previous_revision"], m["revision"]);
     assert_eq!(m["more_commits"], false);
     assert_eq!(m["forced"], false);
-    assert_eq!(m["applications"], serde_json::json!(["app-demo"]));
+    let mut files: Vec<&str> = m["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f.as_str().unwrap())
+        .collect();
+    files.sort();
+    assert_eq!(files, ["README.md", "apps/demo/ns.yaml"]);
 
     // Nothing new: nothing sent.
     let (status, _) = call(&app, "POST", sync).await;
@@ -215,10 +203,5 @@ async fn a_project_tells_its_commits_its_failures_and_its_recovery() {
     // The history records the project, and the API lists the selection.
     let (_, detail) = call(&app, "GET", "/api/v1/webhooks/hook").await;
     assert_eq!(detail["projects"], serde_json::json!(["prj-state"]));
-    assert_eq!(
-        detail["project_applications"],
-        serde_json::json!(["app-demo", "app-other"])
-    );
     assert_eq!(detail["history"][0]["project"], "prj-state");
-    assert_eq!(detail["history"][0]["application"], Value::Null);
 }

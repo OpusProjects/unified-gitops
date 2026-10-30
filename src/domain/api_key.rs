@@ -32,15 +32,15 @@ pub struct ApiKeyDef {
     #[serde(default)]
     pub env: Option<String>,
 
-    // admin = everything; restricted = only the applications listed
+    // admin = everything; restricted = only the projects listed
     #[serde(default)]
     pub role: ApiKeyRole,
 
-    // Application ids this key may see, refresh and sync (restricted keys
-    // only). Connectors, projects, credentials and the configuration
-    // stay admin-only: they describe every system, not one application.
+    // Project ids this key may see and pull (restricted keys only), and
+    // what reacts to them. Credentials and the configuration stay
+    // admin-only: they describe every system, not one project.
     #[serde(default)]
-    pub applications: Vec<String>,
+    pub projects: Vec<String>,
 }
 
 impl ApiKeyDef {

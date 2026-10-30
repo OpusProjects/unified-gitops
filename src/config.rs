@@ -4,8 +4,6 @@ use std::fs;
 use std::path::Path;
 
 use crate::domain::api_key::{ApiKeyDef, ApiKeyRole};
-use crate::domain::app::Application;
-use crate::domain::connector::Connector;
 use crate::domain::credential::{Credential, CredentialRules};
 use crate::domain::project::GitProject;
 use crate::domain::webhook::Webhook;
@@ -16,14 +14,11 @@ pub use web_rs::config::{REQUIRED_CONFIG_FILE, config_files, is_config_path, is_
 
 pub struct AppConfig {
     pub server: ServerConfig,
-    pub state: StateConfig,
     pub projects_config: ProjectsConfig,
     pub secrets_config: SecretsConfig,
     pub config_api: ConfigApiConfig,
     pub credentials: HashMap<String, Credential>,
     pub projects: HashMap<String, GitProject>,
-    pub connectors: HashMap<String, Connector>,
-    pub applications: HashMap<String, Application>,
     pub api_keys: HashMap<String, ApiKeyDef>,
     pub webhooks: HashMap<String, Webhook>,
 }
@@ -127,28 +122,6 @@ fn default_max_body_bytes() -> usize {
     2 * 1024 * 1024
 }
 
-// Where the local copy of every system's current settings lives — config.yaml,
-// `state:` section (optional). One YAML file per application and kind, refreshed
-// from the system at every check (see ports::state_store).
-#[derive(Deserialize, Clone, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct StateConfig {
-    #[serde(default = "default_state_dir")]
-    pub dir: String,
-}
-
-impl Default for StateConfig {
-    fn default() -> Self {
-        Self {
-            dir: default_state_dir(),
-        }
-    }
-}
-
-fn default_state_dir() -> String {
-    "state".to_string()
-}
-
 // Secrets behavior — config.yaml, `secrets:` section (optional, deprecated).
 // The struct lives with the chain it configures, in secrets-rs.
 pub use secrets_rs::SecretsConfig;
@@ -188,10 +161,10 @@ pub struct ConfigApiConfig {
 // config.yaml at the root holds the server settings, and every other *.yaml /
 // *.yml file, at any depth, holds ITEMS under a typed top-level key:
 //
-//   # applications/storage/isilon-prod.yaml
-//   applications:
-//     - name: isilon-prod
-//       connector: powerscale
+//   # projects/infra.yaml
+//   projects:
+//     - name: infra
+//       git_url: https://git.example.com/infra.git
 //       ...
 //
 // The top-level key says what an item is, never the folder: folders are for
@@ -201,22 +174,15 @@ pub struct ConfigApiConfig {
 // API and the state directory use.
 
 // The top-level keys an item file may use.
-pub const SECTIONS: [&str; 6] = [
-    "applications",
-    "connectors",
-    "projects",
-    "credentials",
-    "api_keys",
-    "webhooks",
-];
+pub const SECTIONS: [&str; 4] = ["projects", "credentials", "api_keys", "webhooks"];
 
 // The settings a running process cannot adopt without being restarted, pulled
 // out of AppConfig as plain comparable values.
 //
-// A reload swaps what it can (applications, connectors, projects,
-// credentials, api keys, the shutdown grace, the metrics auth flag, CORS, the
-// body limit) and has to say something honest about the rest: the listener is
-// already bound and the state store already holds its directory. Silently
+// A reload swaps what it can (projects, credentials, api keys, webhooks, the
+// shutdown grace, the metrics auth flag, CORS, the body limit) and has to say
+// something honest about the rest: the listener is already bound and the
+// checkouts are already on disk. Silently
 // ignoring those
 // keys is how a pipeline comes to believe it changed a port it did not
 // change — so they are diffed and NAMED in the reload report instead.
@@ -291,7 +257,6 @@ impl Default for UiConfig {
 pub struct RestartOnlySettings {
     pub host: String,
     pub port: u16,
-    pub state_dir: String,
     pub projects_dir: String,
     pub config_api_enabled: bool,
     pub ui_enabled: bool,
@@ -304,7 +269,6 @@ impl RestartOnlySettings {
         Self {
             host: cfg.server.host.clone(),
             port: cfg.server.port,
-            state_dir: cfg.state.dir.clone(),
             projects_dir: cfg.projects_config.dir.clone(),
             config_api_enabled: cfg.config_api.enabled,
             ui_enabled: cfg.server.ui.enabled,
@@ -324,7 +288,6 @@ impl RestartOnlySettings {
         };
         check(self.host != other.host, "server.host");
         check(self.port != other.port, "server.port");
-        check(self.state_dir != other.state_dir, "state.dir");
         check(self.projects_dir != other.projects_dir, "projects.dir");
         check(
             self.config_api_enabled != other.config_api_enabled,
@@ -348,8 +311,6 @@ impl RestartOnlySettings {
 #[serde(deny_unknown_fields)]
 struct ServerFile {
     server: ServerConfig,
-    #[serde(default)]
-    state: StateConfig,
     #[serde(default)]
     projects: ProjectsConfig,
     #[serde(default)]
@@ -378,59 +339,6 @@ impl AppConfig {
         {
             errors.push(format!(
                 "server.url '{url}' must be an http:// or https:// address"
-            ));
-        }
-
-        // Connectors: how to run them, and a project to resolve the script in
-        // when they name one. What they manage is theirs to describe, checked
-        // at the start of every run (domain::connector).
-        for (id, connector) in &self.connectors {
-            errors.extend(connector.errors(id));
-            if let Some(project_id) = &connector.project
-                && !self.projects.contains_key(project_id)
-            {
-                errors.push(format!(
-                    "Connector '{id}' references unknown project '{project_id}'"
-                ));
-            }
-        }
-
-        // Applications: a known project, connector and credentials, and an id
-        // that can name a folder.
-        for (id, app) in &self.applications {
-            errors.extend(app.errors(id));
-            if !is_safe_id(id) {
-                errors.push(format!(
-                    "Application '{id}' must use only letters, digits, '-', '_' and '.' \
-                     (it names a folder in the state directory)"
-                ));
-            }
-            if !self.projects.contains_key(&app.project) {
-                errors.push(format!(
-                    "Application '{id}' references unknown project '{}'",
-                    app.project
-                ));
-            }
-            if !self.connectors.contains_key(&app.connector) {
-                errors.push(format!(
-                    "Application '{id}' references unknown connector '{}'",
-                    app.connector
-                ));
-            }
-            // A Vault connection is read FROM, never handed to a script
-            // (its token would be).
-            for cred in &app.credentials {
-                if !self.credentials.contains_key(cred) {
-                    errors.push(format!(
-                        "Application '{id}' references unknown credential '{cred}'"
-                    ));
-                } else if self.is_vault(cred) {
-                    errors.push(vault_as_login(&format!("Application '{id}'"), cred));
-                }
-            }
-            errors.extend(delivery_clashes(
-                &format!("Application '{id}'"),
-                &app.credentials,
             ));
         }
 
@@ -469,32 +377,25 @@ impl AppConfig {
             }
         }
 
-        // Restricted API keys must reference existing applications — a typo'd
+        // Restricted API keys must reference existing projects — a typo'd
         // id would otherwise just deny access with no explanation.
         for (id, key) in &self.api_keys {
             errors.extend(key.errors(id));
             if key.role == ApiKeyRole::Restricted {
-                for app_id in &key.applications {
-                    if !self.applications.contains_key(app_id) {
+                for project_id in &key.projects {
+                    if !self.projects.contains_key(project_id) {
                         errors.push(format!(
-                            "API key '{id}' references unknown application '{app_id}'"
+                            "API key '{id}' references unknown project '{project_id}'"
                         ));
                     }
                 }
             }
         }
 
-        // Webhooks: their own settings, then the applications and projects
-        // they listen to and the credentials they send with.
+        // Webhooks: their own settings, then the projects they listen to and
+        // the credentials they send with.
         for (id, webhook) in &self.webhooks {
             errors.extend(webhook.errors(id));
-            for app_id in webhook.applications.named() {
-                if !self.applications.contains_key(app_id) {
-                    errors.push(format!(
-                        "Webhook '{id}' references unknown application '{app_id}'"
-                    ));
-                }
-            }
             for project_id in webhook.projects.named() {
                 if !self.projects.contains_key(project_id) {
                     errors.push(format!(
@@ -741,10 +642,10 @@ impl AppConfig {
                     rule.name
                 ));
             }
-            for id in &rule.applications {
-                if !self.applications.contains_key(id) {
+            for id in &rule.projects {
+                if !self.projects.contains_key(id) {
                     errors.push(format!(
-                        "server.ui.ldap.access '{}' references unknown application '{}'",
+                        "server.ui.ldap.access '{}' references unknown project '{}'",
                         rule.name, id
                     ));
                 }
@@ -752,11 +653,6 @@ impl AppConfig {
         }
         errors
     }
-
-    // Script paths are NOT resolved into project checkouts here. They used to
-    // be (a one-shot rewrite after the boot clones), which coupled serving to
-    // the clones finishing and froze whatever the disk looked like at startup.
-    // Resolution now happens per execution — see application::scripts.
 }
 
 // Everything wrong with a configuration directory, as items.
@@ -797,36 +693,29 @@ pub fn load_config_detailed(dir: &Path) -> Result<AppConfig, ConfigErrors> {
         }
     }
     let mut section = |name: &str| entries.remove(name).unwrap_or_default();
-    let (c, pr, pl, ap, ak, nt) = (
+    let (c, pr, ak, nt) = (
         section("credentials"),
         section("projects"),
-        section("connectors"),
-        section("applications"),
         section("api_keys"),
         section("webhooks"),
     );
     let credentials = take("credential", c, &mut errors);
     let projects = take("project", pr, &mut errors);
-    let connectors = take("connector", pl, &mut errors);
-    let applications = take("application", ap, &mut errors);
     let api_keys = take("API key", ak, &mut errors);
     let webhooks = take("webhook", nt, &mut errors);
     if !errors.is_empty() {
         // Cross-references are only worth checking once every item parsed:
-        // otherwise one typo'd connector also reports every application using it.
+        // otherwise one typo'd credential also reports every project using it.
         return Err(ConfigErrors::new(errors));
     }
 
     let config = AppConfig {
         server: server_file.server,
-        state: server_file.state,
         projects_config: server_file.projects,
         secrets_config: server_file.secrets,
         config_api: server_file.config_api,
         credentials,
         projects,
-        connectors,
-        applications,
         api_keys,
         webhooks,
     };
@@ -999,41 +888,24 @@ mod tests {
         assert_eq!(cfg.server.url.as_deref(), Some("https://gitops.example"));
     }
 
-    const CONNECTOR: &str = "connectors:\n  - name: kv\n    path: connectors/kv.py\n";
     const PROJECT: &str =
         "projects:\n  - name: prj-state\n    git_url: https://example.com/state.git\n";
-
-    const APPLICATION: &str =
-        "applications:\n  - name: portainer\n    connector: kv\n    project: prj-state\n";
     const CREDENTIAL: &str = "credentials:\n  - name: cred-key\n    type: token\n    env_prefix: JT\n    secret_keys:\n      token: KEY\n";
 
-    // Two credentials one application would deliver under one id are
-    // refused, and so are a webhook's: each would overwrite the other's
-    // CREDENTIAL_<ID>_<FIELD> values.
+    // Two credentials a webhook would deliver under one id are refused: each
+    // would overwrite the other's CREDENTIAL_<ID>_<FIELD> values.
     #[test]
-    fn an_application_s_credentials_never_collide() {
+    fn a_webhook_s_credentials_never_collide() {
         let creds = "credentials:\n  - name: cred-vc-aa1\n    type: token\n    env_vars:\n      token: A\n  - name: cred_vc_aa1\n    type: token\n    env_vars:\n      url: B\n";
         let dir = dir_with(&[
-            ("connectors/kv.yaml", CONNECTOR),
             ("projects.yaml", PROJECT),
-            (
-                "applications/portainer.yaml",
-                "applications:\n  - name: portainer\n    connector: kv\n    project: prj-state\n    credentials: [cred-vc-aa1, cred_vc_aa1]\n",
-            ),
             ("credentials.yaml", creds),
             (
                 "webhooks/w.yaml",
-                "webhooks:\n  - name: w\n    type: webhook\n    events: [sync_failed]\n    applications: [portainer]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-vc-aa1, cred_vc_aa1]\n",
+                "webhooks:\n  - name: w\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-state]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-vc-aa1, cred_vc_aa1]\n",
             ),
         ]);
         let err = load_err(&dir);
-        assert!(
-            err.contains(
-                "Application 'portainer' uses credentials 'cred-vc-aa1', 'cred_vc_aa1' that are \
-                 all delivered as CREDENTIAL_VC_AA1_* — rename one"
-            ),
-            "{err}"
-        );
         assert!(
             err.contains("Webhook 'w' uses credentials 'cred-vc-aa1', 'cred_vc_aa1' that are all delivered as CREDENTIAL_VC_AA1_*"),
             "{err}"
@@ -1044,16 +916,11 @@ mod tests {
     #[test]
     fn a_credential_listed_twice_does_not_collide_with_itself() {
         let dir = dir_with(&[
-            ("connectors/kv.yaml", CONNECTOR),
             ("projects.yaml", PROJECT),
-            (
-                "applications/portainer.yaml",
-                "applications:\n  - name: portainer\n    connector: kv\n    project: prj-state\n    credentials: [cred-key, cred-key]\n",
-            ),
             ("credentials/cred-key.yaml", CREDENTIAL),
             (
                 "webhooks/w.yaml",
-                "webhooks:\n  - name: w\n    type: webhook\n    events: [sync_failed]\n    applications: [portainer]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-key, cred-key]\n",
+                "webhooks:\n  - name: w\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-state]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-key, cred-key]\n",
             ),
         ]);
         load_config(dir.path().to_str().unwrap()).expect("loads");
@@ -1066,19 +933,17 @@ mod tests {
     fn a_webhook_s_credentials_must_not_share_a_field() {
         let creds = "credentials:\n  - name: cred-auth\n    type: token\n    env_vars:\n      token: AUTH_TOKEN\n  - name: cred-sign\n    type: token\n    env_prefix: SIGN\n    secret_keys:\n      token: TOKEN\n      secret: SECRET\n  - name: cred-vaulted\n    type: token\n    vault: cred-vault\n    vault_path: team/x\n  - name: cred-vault\n    type: vault\n    address: https://vault.example.com\n    env_vars:\n      token: VAULT_TOKEN\n";
         let dir = dir_with(&[
-            ("connectors/kv.yaml", CONNECTOR),
             ("projects.yaml", PROJECT),
-            ("applications/portainer.yaml", APPLICATION),
             ("credentials.yaml", creds),
             (
                 "webhooks/w.yaml",
-                "webhooks:\n  - name: w\n    type: webhook\n    events: [sync_failed]\n    applications: [portainer]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-auth, cred-sign]\n      sign: {}\n",
+                "webhooks:\n  - name: w\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-state]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-auth, cred-sign]\n      sign: {}\n",
             ),
             // Whatever fields a whole Vault secret holds is not knowable at
             // load: that one loads, and the send says what is shared.
             (
                 "webhooks/v.yaml",
-                "webhooks:\n  - name: v\n    type: webhook\n    events: [sync_failed]\n    applications: [portainer]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-auth, cred-vaulted]\n",
+                "webhooks:\n  - name: v\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-state]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-auth, cred-vaulted]\n",
             ),
         ]);
         let err = load_err(&dir);
@@ -1100,14 +965,12 @@ mod tests {
         let creds = "credentials:\n  - name: cred-a\n    type: username_password\n    env_vars:\n      username: A_USER\n      token: A_TOKEN\n      url: A_URL\n  - name: cred-b\n    type: username_password\n    env_vars:\n      password: B_PASS\n      Token: B_TOKEN\n      url: B_URL\n";
         let webhook = |name: &str, extra: &str| {
             format!(
-                "webhooks:\n  - name: {name}\n    type: webhook\n    events: [sync_failed]\n    applications: [portainer]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-a, cred-b]\n{extra}"
+                "webhooks:\n  - name: {name}\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-state]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-a, cred-b]\n{extra}"
             )
         };
         let base = |file: &str, yaml: String| {
             dir_with(&[
-                ("connectors/kv.yaml", CONNECTOR),
                 ("projects.yaml", PROJECT),
-                ("applications/portainer.yaml", APPLICATION),
                 ("credentials.yaml", creds),
                 (file, &yaml),
             ])
@@ -1151,36 +1014,28 @@ mod tests {
     #[test]
     fn webhooks_load_as_items() {
         let dir = dir_with(&[
-            ("connectors/kv.yaml", CONNECTOR),
             ("projects.yaml", PROJECT),
-            ("applications/portainer.yaml", APPLICATION),
             ("credentials/cred-key.yaml", CREDENTIAL),
             (
                 "webhooks/ntf-ascender-drift.yaml",
-                "webhooks:\n  - name: ntf-ascender-drift\n    type: ascender\n    events: [drift_detected]\n    applications: [portainer]\n    ascender:\n      url: https://ascender.example.com\n      job_template: 12\n      credentials: [cred-key]\n",
+                "webhooks:\n  - name: ntf-ascender-drift\n    type: ascender\n    events: [commit_pulled]\n    projects: [prj-state]\n    ascender:\n      url: https://ascender.example.com\n      job_template: 12\n      credentials: [cred-key]\n",
             ),
         ]);
         let cfg = load_config(dir.path().to_str().unwrap()).expect("loads");
         let n = &cfg.webhooks["ntf-ascender-drift"];
-        assert_eq!(n.applications.named(), ["portainer".to_string()]);
+        assert_eq!(n.projects.named(), ["prj-state".to_string()]);
     }
 
     #[test]
-    fn a_webhook_must_name_known_applications_and_credentials() {
+    fn a_webhook_must_name_known_projects_and_credentials() {
         let dir = dir_with(&[
-            ("connectors/kv.yaml", CONNECTOR),
             ("projects.yaml", PROJECT),
-            ("applications/portainer.yaml", APPLICATION),
             (
                 "webhooks/n.yaml",
-                "webhooks:\n  - name: n\n    type: webhook\n    events: [sync_failed]\n    applications: [portainr]\n    projects: [prj-nope]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-nope]\n",
+                "webhooks:\n  - name: n\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-nope]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-nope]\n",
             ),
         ]);
         let err = load_err(&dir);
-        assert!(
-            err.contains("Webhook 'n' references unknown application 'portainr'"),
-            "{err}"
-        );
         assert!(
             err.contains("Webhook 'n' references unknown project 'prj-nope'"),
             "{err}"
@@ -1194,41 +1049,40 @@ mod tests {
     #[test]
     fn items_load_from_any_depth_by_their_top_level_key() {
         let dir = dir_with(&[
-            // Folders are for people: a connector may live anywhere.
-            ("connectors/kv.yaml", CONNECTOR),
-            ("projects.yml", PROJECT),
+            // Folders are for people: an item may live anywhere.
+            ("credentials/team-a/key.yaml", CREDENTIAL),
             (
-                "applications/team-a/storage/app.yaml",
-                "applications:\n  - name: app\n    description: The app\n    connector: kv\n    config:\n      dir: /tmp/x\n    project: prj-state\n    path: apps/demo\n",
+                "projects/team-a/infra/prj.yaml",
+                "projects:\n  - name: prj\n    description: The infra repo\n    git_url: https://example.com/infra.git\n",
             ),
             // Hidden entries are not configuration.
             (".git/HEAD.yaml", "nonsense: ["),
-            ("applications/.swp.yaml", "nonsense: ["),
+            ("projects/.swp.yaml", "nonsense: ["),
             // Neither is anything that is not YAML.
             ("README.md", "# notes"),
         ]);
         let cfg = load_config(dir.path().to_str().unwrap()).expect("loads");
-        let app = &cfg.applications["app"];
-        assert_eq!(app.description.as_deref(), Some("The app"));
-        assert_eq!(app.sync_interval_seconds, 300);
-        assert!(!app.auto_sync && !app.prune);
-        assert!(cfg.connectors.contains_key("kv") && cfg.projects.contains_key("prj-state"));
+        assert_eq!(
+            cfg.projects["prj"].description.as_deref(),
+            Some("The infra repo")
+        );
+        assert!(cfg.credentials.contains_key("cred-key"));
     }
 
     #[test]
     fn a_configmap_mount_of_symlinks_loads() {
         // What the kubelet writes: the real files in a hidden folder, and a
         // link per key at the top.
-        let dir = dir_with(&[("..2026_10_25/connectors-kv.yaml", CONNECTOR)]);
+        let dir = dir_with(&[("..2026_10_25/projects-state.yaml", PROJECT)]);
         std::os::unix::fs::symlink(dir.path().join("..2026_10_25"), dir.path().join("..data"))
             .unwrap();
         std::os::unix::fs::symlink(
-            "..data/connectors-kv.yaml",
-            dir.path().join("connectors-kv.yaml"),
+            "..data/projects-state.yaml",
+            dir.path().join("projects-state.yaml"),
         )
         .unwrap();
         let cfg = load_config(dir.path().to_str().unwrap()).expect("loads");
-        assert!(cfg.connectors.contains_key("kv"));
+        assert!(cfg.projects.contains_key("prj-state"));
     }
 
     #[test]
@@ -1236,21 +1090,21 @@ mod tests {
         let dir = dir_with(&[(
             "all.yaml",
             &format!(
-                "{CONNECTOR}{}",
+                "{PROJECT}{}",
                 "credentials:\n  - name: a\n    type: token\n    env_prefix: A\n  - name: b\n    type: token\n    env_prefix: B\n"
             ),
         )]);
         let cfg = load_config(dir.path().to_str().unwrap()).expect("loads");
         assert_eq!(cfg.credentials.len(), 2);
-        assert_eq!(cfg.connectors.len(), 1);
+        assert_eq!(cfg.projects.len(), 1);
     }
 
     #[test]
     fn duplicate_names_unknown_keys_and_missing_names_are_all_named() {
         let dir = dir_with(&[
-            ("connectors/one.yaml", CONNECTOR),
-            ("connectors/two.yaml", CONNECTOR),
-            ("typo.yaml", "aplications:\n  - name: x\n"),
+            ("projects/one.yaml", PROJECT),
+            ("projects/two.yaml", PROJECT),
+            ("typo.yaml", "projetcs:\n  - name: x\n"),
             (
                 "nameless.yaml",
                 "projects:\n  - git_url: https://example.com/x.git\n",
@@ -1259,8 +1113,8 @@ mod tests {
         ]);
         let err = load_err(&dir);
         for expected in [
-            "connectors/two.yaml: connector 'kv' is already defined in connectors/one.yaml",
-            "typo.yaml: unknown key 'aplications'",
+            "projects/two.yaml: project 'prj-state' is already defined in projects/one.yaml",
+            "typo.yaml: unknown key 'projetcs'",
             "nameless.yaml: projects item 1 needs a 'name'",
             "bad field.yaml: rename it",
         ] {
@@ -1271,34 +1125,43 @@ mod tests {
     #[test]
     fn broken_references_are_all_named() {
         let dir = dir_with(&[
-            ("kv.yaml", CONNECTOR),
             (
-                "app.yaml",
-                "applications:\n  - name: app\n    connector: nope\n    credentials: [cred-x]\n    project: missing\n    path: ../escape\n",
+                "prj.yaml",
+                "projects:\n  - name: prj\n    git_url: https://example.com/x.git\n    credentials: [cred-x]\n",
+            ),
+            (
+                "w.yaml",
+                "webhooks:\n  - name: w\n    type: webhook\n    events: [pull_failed]\n    projects: [missing]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-y]\n",
+            ),
+            (
+                "keys.yaml",
+                "api_keys:\n  - name: k\n    env_vars:\n      key: K\n    role: restricted\n    projects: [nope]\n",
             ),
         ]);
         let err = load_err(&dir);
         for expected in [
-            "unknown connector 'nope'",
-            "unknown credential 'cred-x'",
-            "unknown project 'missing'",
-            "must stay inside its project checkout",
+            "Project 'prj' references unknown credential 'cred-x'",
+            "Webhook 'w' references unknown project 'missing'",
+            "Webhook 'w' references unknown credential 'cred-y'",
+            "API key 'k' references unknown project 'nope'",
         ] {
             assert!(err.contains(expected), "missing {expected:?} in {err}");
         }
     }
 
+    // The sections applications and connectors were removed: a file still
+    // using them is named, not ignored.
     #[test]
-    fn names_that_would_escape_the_state_directory_are_refused() {
-        let dir = dir_with(&[
-            ("kv.yaml", "connectors:\n  - name: kv\n    path: kv.py\n"),
-            (
-                "app.yaml",
-                "applications:\n  - name: .hidden\n    connector: kv\n    project: p\n",
-            ),
-        ]);
-        let err = load_err(&dir);
-        assert!(err.contains("Application '.hidden'"), "{err}");
+    fn the_removed_sections_are_unknown_keys() {
+        let dir = dir_with(&[(
+            "app.yaml",
+            "applications:\n  - name: a\n    connector: kv\n    project: x\n",
+        )]);
+        assert!(
+            load_err(&dir).contains("app.yaml: unknown key 'applications'"),
+            "{}",
+            load_err(&dir)
+        );
     }
 
     // A project's name is its checkout's folder: `../x` or an absolute name
@@ -1318,53 +1181,15 @@ mod tests {
         }
     }
 
-    // `type` is optional, `script` by default; anything else is refused by name.
-    #[test]
-    fn a_connector_type_is_script_or_refused() {
-        let dir = dir_with(&[(
-            "kv.yaml",
-            "connectors:\n  - name: a\n    path: a.py\n  - name: b\n    type: script\n    path: b.py\n",
-        )]);
-        let cfg = load_config(dir.path().to_str().unwrap()).expect("loads");
-        assert_eq!(
-            cfg.connectors["a"].connector_type,
-            crate::domain::connector::ConnectorType::Script
-        );
-        let dir = dir_with(&[(
-            "kv.yaml",
-            "connectors:\n  - name: a\n    type: rest\n    path: a.py\n",
-        )]);
-        let err = load_err(&dir);
-        assert!(
-            err.contains("connector 'a'") && err.contains("rest"),
-            "{err}"
-        );
-    }
-
-    // What a connector manages is the script's to describe, not configuration:
-    // a `kinds:` left in a connector is an unknown key, named as such.
-    #[test]
-    fn kinds_in_a_connector_are_refused() {
-        let dir = dir_with(&[(
-            "kv.yaml",
-            "connectors:\n  - name: kv\n    path: kv.py\n    kinds:\n      entry:\n        key: name\n",
-        )]);
-        let err = load_err(&dir);
-        assert!(
-            err.contains("connector 'kv'") && err.contains("kinds"),
-            "{err}"
-        );
-    }
-
     #[test]
     fn unknown_keys_inside_an_item_fail_the_load() {
         let dir = dir_with(&[(
-            "app.yaml",
-            "applications:\n  - name: a\n    connector: kv\n    project: x\n    credential_ids: []\n",
+            "prj.yaml",
+            "projects:\n  - name: a\n    git_url: https://example.com/x.git\n    credential_ids: []\n",
         )]);
         let err = load_err(&dir);
         assert!(
-            err.contains("app.yaml: application 'a'") && err.contains("credential_ids"),
+            err.contains("prj.yaml: project 'a'") && err.contains("credential_ids"),
             "{err}"
         );
     }
@@ -1414,11 +1239,7 @@ mod tests {
 
     #[test]
     fn configuration_paths() {
-        for ok in [
-            "config.yaml",
-            "a/b/c.yml",
-            "applications/team-a/isilon-prod.yaml",
-        ] {
+        for ok in ["config.yaml", "a/b/c.yml", "webhooks/team-a/notify.yaml"] {
             assert!(is_config_path(ok), "{ok}");
         }
         for bad in [
@@ -1443,12 +1264,12 @@ mod tests {
         let b = tempfile::tempdir().unwrap();
         fs::write(
             b.path().join("config.yaml"),
-            "server:\n  host: \"127.0.0.1\"\n  port: 9191\nstate:\n  dir: /var/lib/x\n",
+            "server:\n  host: \"127.0.0.1\"\n  port: 9191\nprojects:\n  dir: /var/lib/x\n",
         )
         .unwrap();
         let a = RestartOnlySettings::from_config(&load_config(a.path().to_str().unwrap()).unwrap());
         let b = RestartOnlySettings::from_config(&load_config(b.path().to_str().unwrap()).unwrap());
-        assert_eq!(a.changed_keys(&b), vec!["server.port", "state.dir"]);
+        assert_eq!(a.changed_keys(&b), vec!["server.port", "projects.dir"]);
     }
 
     // A vault_path needs a Vault: the one it names, or the deprecated
@@ -1506,15 +1327,10 @@ mod tests {
     #[test]
     fn a_vault_credential_misused_is_refused_naming_why() {
         let dir = dir_with(&[
-            ("connectors/kv.yaml", CONNECTOR),
             ("projects.yaml", PROJECT),
             (
-                "applications/portainer.yaml",
-                "applications:\n  - name: portainer\n    connector: kv\n    project: prj-state\n    credentials: [cred-vault]\n",
-            ),
-            (
                 "webhooks/w.yaml",
-                "webhooks:\n  - name: w\n    type: ascender\n    events: [drift_detected]\n    applications: [portainer]\n    ascender:\n      url: https://ascender.example.com\n      job_template: 12\n      credentials: [cred-vault]\n",
+                "webhooks:\n  - name: w\n    type: ascender\n    events: [commit_pulled]\n    projects: [prj-state]\n    ascender:\n      url: https://ascender.example.com\n      job_template: 12\n      credentials: [cred-vault]\n",
             ),
             (
                 "creds.yaml",
@@ -1550,7 +1366,6 @@ mod tests {
             "Credential 'cred-b' references unknown vault 'cred-nope'",
             "Credential 'cred-c' names vault 'cred-vault' but no vault_path",
             "sets address, which only a `type: vault` credential uses",
-            "Application 'portainer' uses credential 'cred-vault', which is a Vault connection",
             "Webhook 'w' uses credential 'cred-vault', which is a Vault connection",
         ] {
             assert!(err.contains(expected), "missing '{expected}' in: {err}");

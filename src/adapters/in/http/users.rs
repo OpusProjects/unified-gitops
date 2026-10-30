@@ -40,8 +40,8 @@ pub struct Me {
     /// How this request authenticated: `open`, `api_key` or `ldap`
     pub method: &'static str,
     pub role: &'static str,
-    /// Application ids a restricted caller may see and sync (empty for admin)
-    pub applications: Vec<String>,
+    /// Project ids a restricted caller may see and pull (empty for admin)
+    pub projects: Vec<String>,
     /// The token a browser session sends as `X-CSRF-Token` on every write.
     /// Only for a session (cookie) caller; a header-authenticated caller
     /// needs none. Safe to return: another site cannot read this response.
@@ -77,14 +77,14 @@ pub struct AccessRuleInfo {
     pub groups: Vec<String>,
     pub users: Vec<String>,
     pub role: &'static str,
-    pub applications: Vec<String>,
+    pub projects: Vec<String>,
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct ApiKeyInfo {
     pub name: String,
     pub role: &'static str,
-    pub applications: Vec<String>,
+    pub projects: Vec<String>,
 }
 
 fn role_name(role: ApiKeyRole) -> &'static str {
@@ -98,10 +98,10 @@ fn role_name(role: ApiKeyRole) -> &'static str {
 fn scope(permissions: &Permissions) -> (&'static str, Vec<String>) {
     match permissions {
         Permissions::Admin => ("admin", Vec::new()),
-        Permissions::Scoped { applications } => {
-            let mut applications: Vec<String> = applications.iter().cloned().collect();
-            applications.sort();
-            ("restricted", applications)
+        Permissions::Scoped { projects } => {
+            let mut projects: Vec<String> = projects.iter().cloned().collect();
+            projects.sort();
+            ("restricted", projects)
         }
     }
 }
@@ -122,7 +122,7 @@ pub async fn get_auth(
     session: Option<axum::Extension<BrowserIdentity>>,
 ) -> Json<AuthInfo> {
     let config = state.config();
-    let (role, applications) = scope(&auth.permissions);
+    let (role, projects) = scope(&auth.permissions);
     let admin = auth.permissions.is_admin();
 
     let me = Me {
@@ -133,7 +133,7 @@ pub async fn get_auth(
             AuthMethod::Ldap => "ldap",
         },
         role,
-        applications,
+        projects,
         csrf_token: session.map(|axum::Extension(identity)| identity.csrf),
     };
 
@@ -154,7 +154,7 @@ pub async fn get_auth(
                 groups: rule.groups.clone(),
                 users: rule.users.clone(),
                 role: role_name(rule.role),
-                applications: rule.applications.clone(),
+                projects: rule.projects.clone(),
             })
             .collect(),
     });
@@ -165,11 +165,11 @@ pub async fn get_auth(
             .load()
             .iter()
             .map(|key| {
-                let (role, applications) = scope(&key.permissions);
+                let (role, projects) = scope(&key.permissions);
                 ApiKeyInfo {
                     name: key.name.clone(),
                     role,
-                    applications,
+                    projects,
                 }
             })
             .collect();

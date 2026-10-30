@@ -150,7 +150,7 @@ fn json(body: &str) -> serde_json::Value {
 
 // A source that references a project declared in the same push.
 const PROJECTS: &str = "projects:\n  - name: prj-inv\n    description: \"Inventory\"\n    git_url: \"https://example.invalid/i.git\"\n";
-const SOURCES: &str = "connectors:\n  - name: src-dc4\n    description: \"DC4\"\n    project: \"prj-inv\"\n    path: \"inv.py\"\n";
+const SOURCES: &str = "webhooks:\n  - name: src-dc4\n    description: \"DC4\"\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-inv]\n    webhook:\n      url: https://hooks.example.com/x\n";
 
 // =========================================================================
 // It is off unless it is turned on
@@ -163,7 +163,7 @@ async fn every_route_refuses_when_the_configuration_api_is_disabled() {
 
     for request in [
         get("/api/v1/config"),
-        get("/api/v1/config/connectors.yaml"),
+        get("/api/v1/config/webhooks.yaml"),
         post("/api/v1/config/reload"),
         post("/api/v1/config/validate"),
     ] {
@@ -189,7 +189,7 @@ async fn a_restricted_key_cannot_read_the_configuration() {
             name: "consumer".to_string(),
             secret: KEY.to_string(),
             permissions: Permissions::Scoped {
-                applications: ["src-dc4".to_string()].into_iter().collect(),
+                projects: ["prj-inv".to_string()].into_iter().collect(),
             },
         }])
         .config_api(Arc::new(fs_store(dir.path())), live)
@@ -277,7 +277,7 @@ async fn a_path_the_loader_would_never_read_is_a_404_naming_the_rule() {
         assert!(body.contains("not a configuration path"), "body: {}", body);
     }
     // A valid path that is simply not there yet.
-    let (status, body) = send(&app, get("/api/v1/config/applications/x.yaml")).await;
+    let (status, body) = send(&app, get("/api/v1/config/webhooks/x.yaml")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body.contains("not present"), "body: {}", body);
 }
@@ -307,8 +307,8 @@ async fn validation_reports_every_problem_at_once_and_writes_nothing() {
 
     let body = serde_json::json!({
         "files": {
-            "connectors.yaml": "connectors:\n  - name: src-a\n    description: \"A\"\n    project: \"prj-ghost\"\n    path: \"x.py\"\n",
-            "applications.yaml": "applications:\n  - name: app-a\n    description: \"A\"\n    connector: \"src-nowhere\"\n    project: \"prj-ghost\"\n"
+            "webhooks.yaml": "webhooks:\n  - name: src-a\n    description: \"A\"\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-ghost]\n    webhook:\n      url: https://hooks.example.com/x\n",
+            "projects.yaml": "projects:\n  - name: prj-a\n    git_url: https://example.invalid/a.git\n    credentials: [cred-nowhere]\n"
         }
     });
     let request = Request::builder()
@@ -329,7 +329,7 @@ async fn validation_reports_every_problem_at_once_and_writes_nothing() {
         "every problem at once, not the first: {:?}",
         errors
     );
-    assert!(!dir.path().join("connectors.yaml").exists());
+    assert!(!dir.path().join("webhooks.yaml").exists());
 }
 
 // =========================================================================
@@ -344,8 +344,8 @@ async fn a_write_that_would_not_load_is_refused_and_the_directory_is_untouched()
     let (status, body) = send(
         &app,
         put_yaml(
-            "/api/v1/config/connectors.yaml",
-            "connectors:\n  - name: src-a\n    description: \"A\"\n    project: \"prj-ghost\"\n    path: \"x.py\"\n",
+            "/api/v1/config/webhooks.yaml",
+            "webhooks:\n  - name: src-a\n    description: \"A\"\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-ghost]\n    webhook:\n      url: https://hooks.example.com/x\n",
         ),
     )
     .await;
@@ -364,7 +364,7 @@ async fn a_write_that_would_not_load_is_refused_and_the_directory_is_untouched()
             .any(|e| e.as_str().expect("str").contains("prj-ghost"))
     );
     assert!(
-        read(dir.path(), "connectors.yaml").is_none(),
+        read(dir.path(), "webhooks.yaml").is_none(),
         "a rejected write must not reach the disk"
     );
 }
@@ -375,38 +375,35 @@ async fn a_valid_write_lands_but_waits_for_a_reload_to_take_effect() {
     let (app, state) = app_at(dir.path());
 
     let bundle =
-        serde_json::json!({"files": {"projects.yaml": PROJECTS, "connectors.yaml": SOURCES}});
+        serde_json::json!({"files": {"projects.yaml": PROJECTS, "webhooks.yaml": SOURCES}});
     let (status, body) = send(&app, put_json("/api/v1/config", bundle)).await;
     assert_eq!(status, StatusCode::OK, "body: {}", body);
 
     let result = json(&body);
-    assert_eq!(result["summary"]["connectors"], 1);
+    assert_eq!(result["summary"]["webhooks"], 1);
     assert!(result["reloaded"].is_null(), "no reload was asked for");
     assert_eq!(
         result["reload_pending"], true,
         "the files are on disk and the process is still serving the old configuration"
     );
-    assert_eq!(
-        read(dir.path(), "connectors.yaml").as_deref(),
-        Some(SOURCES)
-    );
+    assert_eq!(read(dir.path(), "webhooks.yaml").as_deref(), Some(SOURCES));
 
     // Still not live.
-    assert!(state.config().connectors.is_empty());
+    assert!(state.config().webhooks.is_empty());
 
     let (status, body) = send(&app, post("/api/v1/config/reload")).await;
     assert_eq!(status, StatusCode::OK);
     let reloaded = json(&body);
     assert_eq!(reloaded["generation"], 1);
-    assert_eq!(reloaded["connectors"]["added"][0], "src-dc4");
+    assert_eq!(reloaded["webhooks"]["added"][0], "src-dc4");
     assert!(
         reloaded["applied"]
             .as_array()
             .expect("applied")
             .iter()
-            .any(|s| s == "connectors")
+            .any(|s| s == "webhooks")
     );
-    assert!(state.config().connectors.contains_key("src-dc4"));
+    assert!(state.config().webhooks.contains_key("src-dc4"));
 }
 
 #[tokio::test]
@@ -415,14 +412,14 @@ async fn a_write_can_apply_itself_in_the_same_request() {
     let (app, state) = app_at(dir.path());
 
     let bundle =
-        serde_json::json!({"files": {"projects.yaml": PROJECTS, "connectors.yaml": SOURCES}});
+        serde_json::json!({"files": {"projects.yaml": PROJECTS, "webhooks.yaml": SOURCES}});
     let (status, body) = send(&app, put_json("/api/v1/config?reload=true", bundle)).await;
 
     assert_eq!(status, StatusCode::OK);
     let result = json(&body);
     assert_eq!(result["reload_pending"], false);
     assert_eq!(result["reloaded"]["generation"], 1);
-    assert!(state.config().connectors.contains_key("src-dc4"));
+    assert!(state.config().webhooks.contains_key("src-dc4"));
     assert_eq!(state.reload.generation(), 1);
 }
 
@@ -452,7 +449,7 @@ async fn a_stale_write_is_refused_rather_than_applied_on_top() {
         .header("content-type", "application/json")
         .header("if-match", format!("\"{}\"", etag))
         .body(axum::body::Body::from(
-            serde_json::json!({"files": {"applications.yaml": ""}}).to_string(),
+            serde_json::json!({"files": {"empty.yaml": ""}}).to_string(),
         ))
         .expect("request");
     let (status, body) = send(&app, request).await;
@@ -460,7 +457,7 @@ async fn a_stale_write_is_refused_rather_than_applied_on_top() {
     assert_eq!(status, StatusCode::PRECONDITION_FAILED);
     assert!(body.contains("If-Match"), "body: {}", body);
     assert!(
-        read(dir.path(), "applications.yaml").is_none(),
+        read(dir.path(), "empty.yaml").is_none(),
         "the refused write must not have landed"
     );
 }
@@ -491,7 +488,7 @@ async fn a_matching_if_match_goes_through() {
 async fn pushing_the_whole_directory_removes_what_it_left_out() {
     let dir = config_dir("UNIFIED_API_TEST_KEY_PRUNE");
     write(dir.path(), "projects.yaml", PROJECTS);
-    write(dir.path(), "connectors.yaml", SOURCES);
+    write(dir.path(), "webhooks.yaml", SOURCES);
     let (app, state) = app_at(dir.path());
 
     let bundle = serde_json::json!({
@@ -504,30 +501,27 @@ async fn pushing_the_whole_directory_removes_what_it_left_out() {
     let (status, body) = send(&app, put_json("/api/v1/config?reload=true", bundle)).await;
 
     assert_eq!(status, StatusCode::OK, "body: {}", body);
-    assert!(read(dir.path(), "connectors.yaml").is_none());
+    assert!(read(dir.path(), "webhooks.yaml").is_none());
     assert!(read(dir.path(), "projects.yaml").is_none());
-    assert!(state.config().connectors.is_empty(), "and it is live");
-    assert_eq!(
-        json(&body)["reloaded"]["connectors"]["removed"][0],
-        "src-dc4"
-    );
+    assert!(state.config().webhooks.is_empty(), "and it is live");
+    assert_eq!(json(&body)["reloaded"]["webhooks"]["removed"][0], "src-dc4");
 }
 
 #[tokio::test]
 async fn deleting_a_file_is_allowed_but_never_config_yaml() {
     let dir = config_dir("UNIFIED_API_TEST_KEY_DELETE");
-    write(dir.path(), "applications.yaml", "");
+    write(dir.path(), "empty.yaml", "");
     let (app, _) = app_at(dir.path());
 
     let request = Request::builder()
         .method("DELETE")
-        .uri("/api/v1/config/applications.yaml")
+        .uri("/api/v1/config/empty.yaml")
         .header("x-api-key", KEY)
         .body(axum::body::Body::empty())
         .expect("request");
     let (status, _) = send(&app, request).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(read(dir.path(), "applications.yaml").is_none());
+    assert!(read(dir.path(), "empty.yaml").is_none());
 
     let request = Request::builder()
         .method("DELETE")

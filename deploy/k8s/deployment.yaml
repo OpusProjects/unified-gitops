@@ -7,8 +7,7 @@
 #                           flat, see deploy/README.md for folders)
 #   unified-gitops-env      Secret with the env table (API keys, credential values)
 #   unified-gitops-secrets  Secret with file-delivered secrets (SSH key, JSON files)
-#   unified-gitops-state    PVC for project checkouts and the local copy of
-#                           each system's settings
+#   unified-gitops-state    PVC for project checkouts
 # The Secrets can be plain, Sealed Secrets, or filled by External Secrets
 # Operator from Vault; nothing here depends on which.
 apiVersion: apps/v1

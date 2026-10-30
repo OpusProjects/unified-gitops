@@ -65,8 +65,6 @@ pub struct ReloadReport {
     // config.yaml keys that differ from what this process was built with, and
     // therefore need a restart to take effect
     pub restart_required: Vec<String>,
-    pub applications: SectionDelta,
-    pub connectors: SectionDelta,
     pub projects: SectionDelta,
     pub credentials: SectionDelta,
     pub webhooks: SectionDelta,
@@ -136,7 +134,7 @@ pub fn apply(state: &AppState, cfg: &AppConfig) -> ReloadReport {
         generation = report.generation,
         applied = ?report.applied,
         restart_required = ?report.restart_required,
-        applications_changed = report.applications.total(),
+        projects_changed = report.projects.total(),
         "Configuration reloaded"
     );
     // The same notices startup logs: a configuration pushed and reloaded in
@@ -150,8 +148,6 @@ pub fn apply(state: &AppState, cfg: &AppConfig) -> ReloadReport {
 
 fn runtime_config(cfg: &AppConfig) -> RuntimeConfig {
     RuntimeConfig {
-        applications: cfg.applications.clone(),
-        connectors: cfg.connectors.clone(),
         credentials: cfg.credentials.clone(),
         webhooks: cfg.webhooks.clone(),
         projects: cfg.projects.clone(),
@@ -179,8 +175,6 @@ fn diff(
     live: Option<RestartOnlySettings>,
 ) -> ReloadReport {
     let mut report = ReloadReport {
-        applications: SectionDelta::between(&previous.applications, &next.applications),
-        connectors: SectionDelta::between(&previous.connectors, &next.connectors),
         projects: SectionDelta::between(&previous.projects, &next.projects),
         credentials: SectionDelta::between(&previous.credentials, &next.credentials),
         webhooks: SectionDelta::between(&previous.webhooks, &next.webhooks),
@@ -189,8 +183,6 @@ fn diff(
 
     let mut applied = Vec::new();
     for (name, delta) in [
-        ("applications", &report.applications),
-        ("connectors", &report.connectors),
         ("projects", &report.projects),
         ("credentials", &report.credentials),
         ("webhooks", &report.webhooks),

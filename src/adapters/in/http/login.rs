@@ -64,7 +64,7 @@ impl web_rs::login::SignIn<Permissions> for Directory<'_> {
         .await?;
         let permissions = match logged.grant {
             Grant::Admin => Permissions::Admin,
-            Grant::Scoped { applications } => Permissions::Scoped { applications },
+            Grant::Scoped { projects } => Permissions::Scoped { projects },
         };
         Ok((logged.username, permissions))
     }

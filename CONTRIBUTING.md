@@ -24,7 +24,7 @@ Commit and PR titles follow [Conventional Commits](https://www.conventionalcommi
 release-please reads them to pick the next version and to write the CHANGELOG.
 
 - Title: `<type>: short imperative summary`, lowercase after the colon —
-  `feat: add the prune option to applications`, `fix: compare numbers by
+  `feat: add path filters to webhooks`, `fix: compare numbers by
   value in the diff`. Types in use: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`,
   `build`, `chore`.
 - A breaking change adds `!` after the type (`feat!: ...`) or a
@@ -52,11 +52,10 @@ rules that matter when writing code:
 
 1. **Use-case logic lives in `src/application/` only.** HTTP handlers and the
    scheduler are thin translators; if you find yourself orchestrating
-   connector-state-secrets work in a handler, move it to an application function.
-2. **Nothing reaches a system before desired state validates.** A run reads and
-   validates every file first, and only then lists or applies; keep it that way.
-3. **The diff is the core's, not the connector's.** A connector lists and applies one
-   operation; ordering, prune, drift and locks stay in `application/reconcile.rs`.
+   git-secrets-HTTP work in a handler, move it to an application function.
+2. **Validate at load, not at run.** Everything a configuration item says that can be
+   checked without reaching a system is checked when the configuration loads, so a
+   bad push fails `--check-config`, not a run at 3 a.m.
 
 Dependency direction is `adapters → application → ports → domain`, never the reverse.
 `domain/` stays pure: `std` + `serde` only, plus the types it shares with unified-api from
@@ -94,7 +93,6 @@ consumers should still pin the version tag. See
 cargo test                # unit + integration; integration tests use the fixtures under tests/
 ```
 
-The test connectors under `tests/connectors/` (the `kv.py` example and its SDK among them) are
-plain Python — no external services are needed to run the
-full suite. See [docs/testing.md](docs/testing.md) for what the suite covers, running
+No external services are needed to run the full suite: repositories are local `file://`
+ones, and webhooks go to a recorder. See [docs/testing.md](docs/testing.md) for what the suite covers, running
 a subset, and where new tests belong.

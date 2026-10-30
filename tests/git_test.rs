@@ -62,7 +62,7 @@ fn keys() -> Vec<ResolvedApiKey> {
             name: "limited".to_string(),
             secret: "lim".to_string(),
             permissions: Permissions::Scoped {
-                applications: std::collections::HashSet::new(),
+                projects: ["prj-own".to_string()].into_iter().collect(),
             },
         },
     ]
@@ -119,20 +119,30 @@ async fn post_project_sync_clones_on_demand() {
 }
 
 #[tokio::test]
-async fn project_routes_are_admin_only() {
+async fn a_restricted_key_reaches_only_its_projects() {
     let workdir = tempfile::tempdir().unwrap();
-    let projects = [("prj-test".to_string(), project("file:///nowhere/repo.git"))]
-        .into_iter()
-        .collect();
+    let projects = [
+        ("prj-test".to_string(), project("file:///nowhere/repo.git")),
+        ("prj-own".to_string(), project("file:///nowhere/own.git")),
+    ]
+    .into_iter()
+    .collect();
     let app = unified_gitops::AppBuilder::new()
         .projects(projects, workdir.path().to_path_buf())
         .api_keys(keys())
         .build();
 
-    let (status, _) = request(app.clone(), "GET", "/api/v1/projects", "lim").await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    let (status, _) = request(app, "POST", "/api/v1/projects/prj-test/sync", "lim").await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body) = request(app.clone(), "GET", "/api/v1/projects", "lim").await;
+    assert_eq!(status, StatusCode::OK);
+    let list: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    let names: Vec<&str> = list.iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["prj-own"]);
+    // Another's project reads as absent; its own is pulled (and fails here,
+    // the repository being nowhere).
+    let (status, _) = request(app.clone(), "POST", "/api/v1/projects/prj-test/sync", "lim").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = request(app, "POST", "/api/v1/projects/prj-own/sync", "lim").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
 }
 
 #[tokio::test]
@@ -172,10 +182,12 @@ async fn a_project_lists_what_uses_it() {
     ]
     .into_iter()
     .collect();
-    let app_def: unified_gitops::domain::app::Application =
-        serde_saphyr::from_str("connector: kv\nproject: prj-test\npath: apps\n").unwrap();
+    let hook: unified_gitops::domain::webhook::Webhook = serde_saphyr::from_str(
+        "type: webhook\nevents: [commit_pulled]\nprojects: [prj-test]\nwebhook:\n  url: https://hooks.example.com/x\n",
+    )
+    .unwrap();
     let app = unified_gitops::AppBuilder::new()
-        .applications([("app-a".to_string(), app_def)].into_iter().collect())
+        .webhooks([("hook".to_string(), hook)].into_iter().collect())
         .projects(projects, workdir.path().to_path_buf())
         .api_keys(keys())
         .build();
@@ -185,11 +197,11 @@ async fn a_project_lists_what_uses_it() {
     let list: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
     let by_id = |id: &str| list.iter().find(|p| p["name"] == id).unwrap().clone();
     assert_eq!(
-        by_id("prj-test")["used_by"]["applications"],
-        serde_json::json!(["app-a"])
+        by_id("prj-test")["used_by"]["webhooks"],
+        serde_json::json!(["hook"])
     );
     assert_eq!(
-        by_id("prj-idle")["used_by"]["applications"],
+        by_id("prj-idle")["used_by"]["webhooks"],
         serde_json::json!([])
     );
     assert_eq!(by_id("prj-test")["timeout_seconds"], 300);

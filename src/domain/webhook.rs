@@ -3,8 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-// A webhook: which events, from which applications and projects, and where
-// they go.
+// A webhook: which events, from which projects, and where they go.
 // The `type` names the receiver; its settings live in the block of the same
 // name (`webhook:`, `ascender:`, `awx:`), so a block that belongs to another
 // type is a load error rather than settings silently ignored, and adding a
@@ -17,14 +16,8 @@ pub struct Webhook {
     #[serde(rename = "type")]
     pub webhook_type: WebhookType,
     pub events: Vec<Event>,
-    // `all`, or the applications by name. Left out or `[]`: none, as an API
-    // key or an LDAP rule with no applications reaches none.
-    #[serde(default)]
-    pub applications: Selection,
-    // `all`, or projects by name: their own events (a pull that brought
-    // commits, or failed), and the events of every application reading from
-    // them, including applications added later. Combined with
-    // `applications`.
+    // `all`, or projects by name. Left out or `[]`: none, as an API key or
+    // an LDAP rule with no projects reaches none.
     #[serde(default)]
     pub projects: Selection,
     #[serde(default)]
@@ -35,8 +28,7 @@ pub struct Webhook {
     pub awx: Option<JobTemplateTarget>,
 }
 
-// Which applications (or projects) a webhook listens to: the word `all`, or
-// a list.
+// Which projects a webhook listens to: the word `all`, or a list.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum Selection {
@@ -44,7 +36,7 @@ pub enum Selection {
     Named(Vec<String>),
 }
 
-// The one word `applications:` and `projects:` take instead of a list.
+// The one word `projects:` takes instead of a list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AllWord {
@@ -105,27 +97,15 @@ impl WebhookType {
     }
 }
 
-// What happened, as a webhook names it: to an application (one run produces
-// at most one, application::webhooks::detect), or to a project's checkout
-// (one pull produces at most one, application::webhooks::detect_pull).
+// What happened to a project's checkout, as a webhook names it (one pull
+// produces at most one, application::webhooks::detect_pull).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Event {
-    // The system differs from a commit already applied: someone changed it
-    // outside git. With auto_sync it is reverted in the same run.
-    DriftDetected,
-    // A new commit is waiting to be applied (auto_sync off).
-    OutOfSync,
-    // A sync applied at least one change from git (a commit or a rollback).
-    SyncSucceeded,
-    // A check or a sync could not finish, or some of its operations failed.
-    SyncFailed,
-    // In sync again after a failure or a difference.
-    BackInSync,
     // A pull brought new commits into a project's checkout.
     CommitPulled,
-    // A project's repository could not be pulled: the applications reading
-    // from it stay on the commit they have.
+    // A project's repository could not be pulled: the checkout stays on the
+    // commit it has.
     PullFailed,
     // Pulls work again after failing.
     PullRecovered,
@@ -134,24 +114,10 @@ pub enum Event {
 impl Event {
     pub fn as_str(self) -> &'static str {
         match self {
-            Event::DriftDetected => "drift_detected",
-            Event::OutOfSync => "out_of_sync",
-            Event::SyncSucceeded => "sync_succeeded",
-            Event::SyncFailed => "sync_failed",
-            Event::BackInSync => "back_in_sync",
             Event::CommitPulled => "commit_pulled",
             Event::PullFailed => "pull_failed",
             Event::PullRecovered => "pull_recovered",
         }
-    }
-
-    // About a project rather than one application: only `projects:` can
-    // select it.
-    pub fn is_project_event(self) -> bool {
-        matches!(
-            self,
-            Event::CommitPulled | Event::PullFailed | Event::PullRecovered
-        )
     }
 }
 
@@ -274,23 +240,16 @@ fn default_signature_field() -> String {
     "secret".to_string()
 }
 
-// The fields a body template may name: the keys of every message (an
-// application's or a project's; a field a message does not have is null),
+// The fields a body template may name: the keys of every message (a field
+// an event's message does not have is null),
 // plus a short revision. Checked at load, so a typo fails the push, not a
 // send.
-pub const TEMPLATE_FIELDS: [&str; 23] = [
+pub const TEMPLATE_FIELDS: [&str; 16] = [
     "event",
-    "application",
     "project",
     "description",
-    "status",
-    "previous_status",
-    "cause",
-    "reverted",
     "revision",
     "revision_short",
-    "applied",
-    "changes",
     "errors",
     "at",
     "url",
@@ -299,7 +258,7 @@ pub const TEMPLATE_FIELDS: [&str; 23] = [
     "commits",
     "more_commits",
     "forced",
-    "applications",
+    "files",
     "consecutive_failures",
     "failing_seconds",
 ];
@@ -320,24 +279,11 @@ impl Webhook {
         if self.events.is_empty() {
             errors.push(at("needs at least one event".to_string()));
         }
-        // A project event reaches only the projects a webhook names: with
-        // none, it could never be sent.
-        let project_events: Vec<&str> = self
-            .events
-            .iter()
-            .filter(|e| e.is_project_event())
-            .map(|e| e.as_str())
-            .collect();
-        if !project_events.is_empty() && self.projects.is_empty() {
-            errors.push(at(format!(
-                "{} {} about projects: name them in 'projects:'",
-                project_events.join(", "),
-                if project_events.len() == 1 {
-                    "is"
-                } else {
-                    "are"
-                }
-            )));
+        // Every event is a project's: with no projects, none could be sent.
+        if self.projects.is_empty() {
+            errors.push(at(
+                "names no projects: list them in 'projects:', or write 'projects: all'".to_string(),
+            ));
         }
         let blocks = [
             ("webhook", self.webhook.is_some()),
@@ -399,17 +345,9 @@ impl Webhook {
         fields
     }
 
-    // Whether this webhook wants `event` from `application`, which reads
-    // from `project`.
-    pub fn wants(&self, event: Event, application: &str, project: &str) -> bool {
-        !event.is_project_event()
-            && self.events.contains(&event)
-            && (self.applications.includes(application) || self.projects.includes(project))
-    }
-
-    // Whether this webhook wants `event` from `project` itself.
+    // Whether this webhook wants `event` from `project`.
     pub fn wants_project(&self, event: Event, project: &str) -> bool {
-        event.is_project_event() && self.events.contains(&event) && self.projects.includes(project)
+        self.events.contains(&event) && self.projects.includes(project)
     }
 
     // Where it sends, without anything a URL can carry that is secret: a
@@ -655,7 +593,7 @@ mod tests {
     #[test]
     fn a_webhook_with_its_block_is_valid() {
         let n = parse(
-            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://alerts.example.com/x\n",
+            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://alerts.example.com/x\n",
         );
         assert!(n.errors("n").is_empty(), "{:?}", n.errors("n"));
         assert_eq!(n.webhook.unwrap().method, "POST");
@@ -664,7 +602,7 @@ mod tests {
     #[test]
     fn the_type_and_its_block_must_agree() {
         let n = parse(
-            "type: ascender\nevents: [sync_failed]\nwebhook:\n  url: https://alerts.example.com/x\n",
+            "type: ascender\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://alerts.example.com/x\n",
         );
         let errors = n.errors("n").join("\n");
         assert!(
@@ -681,12 +619,12 @@ mod tests {
     fn an_unknown_event_or_key_fails_to_parse() {
         assert!(
             serde_saphyr::from_str::<Webhook>(
-                "type: webhook\nevents: [drifted]\nwebhook:\n  url: https://x.example.com\n"
+                "type: webhook\nevents: [drifted]\nprojects: all\nwebhook:\n  url: https://x.example.com\n"
             )
             .is_err()
         );
         assert!(serde_saphyr::from_str::<Webhook>(
-            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n  token: x\n"
+            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n  token: x\n"
         )
         .is_err());
     }
@@ -694,25 +632,25 @@ mod tests {
     #[test]
     fn a_body_may_only_name_message_fields() {
         let n = parse(
-            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n  body: '{\"a\": \"{{application}}\", \"b\": {{chnages}}}'\n",
+            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n  body: '{\"a\": \"{{project}}\", \"b\": {{chnages}}}'\n",
         );
         let errors = n.errors("n").join("\n");
         assert!(errors.contains("'{{chnages}}'"), "{errors}");
-        assert!(!errors.contains("{{application}}"), "{errors}");
+        assert!(!errors.contains("{{project}}"), "{errors}");
         assert_eq!(n.errors("n").len(), 1, "{errors}");
     }
 
     #[test]
     fn auth_takes_a_scheme_or_a_header() {
         let bearer = parse(
-            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n  credentials: [c]\n  auth: basic\n",
+            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n  credentials: [c]\n  auth: basic\n",
         );
         assert_eq!(
             bearer.webhook.unwrap().auth,
             Auth::Scheme(AuthScheme::Basic)
         );
         let header = parse(
-            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n  credentials: [c]\n  auth: {header: X-Gitlab-Token}\n",
+            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n  credentials: [c]\n  auth: {header: X-Gitlab-Token}\n",
         );
         assert_eq!(
             header.webhook.unwrap().auth,
@@ -722,16 +660,16 @@ mod tests {
         );
         // Strict: a key the header form does not have is an error.
         assert!(serde_saphyr::from_str::<Webhook>(
-            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n  credentials: [c]\n  auth: {header: X-Key, value: y}\n"
+            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n  credentials: [c]\n  auth: {header: X-Key, value: y}\n"
         )
         .is_err());
         // One header, one source.
         let twice = parse(
-            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n  credentials: [c]\n  headers: {authorization: x}\n",
+            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n  credentials: [c]\n  headers: {authorization: x}\n",
         );
         assert!(twice.errors("n").join("").contains("set it in one place"));
         let missing = parse(
-            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n  auth: bearer\n",
+            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n  auth: bearer\n",
         );
         assert!(missing.errors("n").join("").contains("needs a credential"));
     }
@@ -739,7 +677,7 @@ mod tests {
     #[test]
     fn a_job_template_target_names_one_template_and_one_credential() {
         let n = parse(
-            "type: ascender\nevents: [drift_detected]\nascender:\n  url: https://ascender.example.com\n  job_template: 7\n  credentials: [k]\n",
+            "type: ascender\nevents: [commit_pulled]\nprojects: all\nascender:\n  url: https://ascender.example.com\n  job_template: 7\n  credentials: [k]\n",
         );
         assert!(n.errors("n").is_empty(), "{:?}", n.errors("n"));
         let target = n.ascender.unwrap();
@@ -749,7 +687,7 @@ mod tests {
         );
 
         let workflow = parse(
-            "type: awx\nevents: [drift_detected]\nawx:\n  url: https://awx.example.com/\n  workflow_job_template: 9\n  credentials: [k]\n",
+            "type: awx\nevents: [commit_pulled]\nprojects: all\nawx:\n  url: https://awx.example.com/\n  workflow_job_template: 9\n  credentials: [k]\n",
         );
         assert_eq!(
             workflow.awx.unwrap().endpoint(),
@@ -757,12 +695,12 @@ mod tests {
         );
         // The launch API is not a way in: trigger and extra_vars are unknown keys.
         assert!(serde_saphyr::from_str::<Webhook>(
-            "type: ascender\nevents: [drift_detected]\nascender:\n  url: https://a.example.com\n  job_template: 7\n  credentials: [k]\n  trigger: launch\n"
+            "type: ascender\nevents: [commit_pulled]\nprojects: all\nascender:\n  url: https://a.example.com\n  job_template: 7\n  credentials: [k]\n  trigger: launch\n"
         )
         .is_err());
 
         let wrong = parse(
-            "type: ascender\nevents: [drift_detected]\nascender:\n  url: https://ascender.example.com/api/v2\n  job_template: 7\n  workflow_job_template: 8\n",
+            "type: ascender\nevents: [commit_pulled]\nprojects: all\nascender:\n  url: https://ascender.example.com/api/v2\n  job_template: 7\n  workflow_job_template: 8\n",
         );
         let errors = wrong.errors("n").join("\n");
         assert!(errors.contains("without /api"), "{errors}");
@@ -771,63 +709,43 @@ mod tests {
     }
 
     #[test]
-    fn wants_filters_on_event_and_application() {
+    fn wants_filters_on_event_and_project() {
         let n = parse(
-            "type: webhook\nevents: [sync_failed]\napplications: [a]\nwebhook:\n  url: https://x.example.com\n",
-        );
-        assert!(n.wants(Event::SyncFailed, "a", "p"));
-        assert!(!n.wants(Event::SyncFailed, "b", "p"));
-        assert!(!n.wants(Event::DriftDetected, "a", "p"));
-        let all = parse(
-            "type: webhook\nevents: [sync_failed]\napplications: all\nwebhook:\n  url: https://x.example.com\n",
-        );
-        assert!(all.applications.is_all());
-        assert!(all.wants(Event::SyncFailed, "anything", "p"));
-        // Left out or empty: none, as an API key with no applications.
-        let none =
-            parse("type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n");
-        assert!(!none.wants(Event::SyncFailed, "anything", "p"));
-        let empty = parse(
-            "type: webhook\nevents: [sync_failed]\napplications: []\nwebhook:\n  url: https://x.example.com\n",
-        );
-        assert!(!empty.wants(Event::SyncFailed, "anything", "p"));
-        assert!(serde_saphyr::from_str::<Webhook>(
-            "type: webhook\nevents: [sync_failed]\napplications: every\nwebhook:\n  url: https://x.example.com\n"
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn projects_select_their_applications_and_their_own_events() {
-        let n = parse(
-            "type: webhook\nevents: [sync_failed, commit_pulled]\nprojects: [p]\napplications: [x]\nwebhook:\n  url: https://x.example.com\n",
+            "type: webhook\nevents: [commit_pulled]\nprojects: [p]\nwebhook:\n  url: https://x.example.com\n",
         );
         assert!(n.errors("n").is_empty(), "{:?}", n.errors("n"));
-        // Every application reading from p, and x wherever it reads from.
-        assert!(n.wants(Event::SyncFailed, "any", "p"));
-        assert!(n.wants(Event::SyncFailed, "x", "q"));
-        assert!(!n.wants(Event::SyncFailed, "any", "q"));
         assert!(n.wants_project(Event::CommitPulled, "p"));
         assert!(!n.wants_project(Event::CommitPulled, "q"));
-        // A project event is never an application's, nor the reverse.
-        assert!(!n.wants(Event::CommitPulled, "x", "p"));
-        assert!(!n.wants_project(Event::SyncFailed, "p"));
+        assert!(!n.wants_project(Event::PullFailed, "p"));
         let all = parse(
             "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n",
         );
+        assert!(all.projects.is_all());
         assert!(all.wants_project(Event::PullFailed, "anything"));
+        assert!(
+            serde_saphyr::from_str::<Webhook>(
+                "type: webhook\nevents: [pull_failed]\nprojects: every\nwebhook:\n  url: https://x.example.com\n"
+            )
+            .is_err()
+        );
     }
 
+    // Left out or empty: none, as an API key with no projects — refused, as
+    // it could never send.
     #[test]
-    fn a_project_event_needs_projects() {
-        let n = parse(
-            "type: webhook\nevents: [commit_pulled, pull_failed, sync_failed]\napplications: all\nwebhook:\n  url: https://x.example.com\n",
-        );
-        let errors = n.errors("n").join("\n");
-        assert!(
-            errors.contains("commit_pulled, pull_failed are about projects"),
-            "{errors}"
-        );
+    fn a_webhook_needs_projects() {
+        for yaml in [
+            "type: webhook\nevents: [pull_failed]\nwebhook:\n  url: https://x.example.com\n",
+            "type: webhook\nevents: [pull_failed]\nprojects: []\nwebhook:\n  url: https://x.example.com\n",
+        ] {
+            let n = parse(yaml);
+            assert!(!n.wants_project(Event::PullFailed, "anything"));
+            assert!(
+                n.errors("n").join("").contains("names no projects"),
+                "{:?}",
+                n.errors("n")
+            );
+        }
     }
 
     #[test]

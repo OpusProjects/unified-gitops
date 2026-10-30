@@ -5,7 +5,6 @@ use std::sync::Arc;
 use utoipa::ToSchema;
 
 use crate::AppState;
-use crate::domain::run::SyncStatus;
 use crate::domain::sync_health::SyncHealth;
 
 #[utoipa::path(
@@ -23,18 +22,18 @@ pub async fn healthz(State(_state): State<Arc<AppState>>) -> &'static str {
 #[derive(Serialize, ToSchema)]
 pub struct ReadyStatus {
     pub ready: bool,
-    pub applications_total: usize,
-    pub applications_checked: usize,
-    /// Applications not compared with their systems yet (their first check
-    /// is still to come, or their checkout is not there yet)
-    pub applications_pending: Vec<String>,
+    pub projects_total: usize,
+    pub projects_pulled: usize,
+    /// Projects not pulled successfully yet (their first pull is still to
+    /// come, or it failed)
+    pub projects_pending: Vec<String>,
 }
 
 // Ready as soon as the process serves. Unlike unified-api, whose readiness is
 // "has data to serve", this service's job is to reach OTHER systems: making it
-// unready because a system is down would add pod restarts to that outage and
-// take the API that explains it away. The body still says which applications
-// have not been checked yet, for whoever is watching a rollout.
+// unready because a git host is down would add pod restarts to that outage
+// and take the API that explains it away. The body still says which projects
+// have not been pulled yet, for whoever is watching a rollout.
 #[utoipa::path(
     get,
     path = "/readyz",
@@ -46,17 +45,22 @@ pub struct ReadyStatus {
 pub async fn readyz(State(state): State<Arc<AppState>>) -> Json<ReadyStatus> {
     let config = state.config();
     let mut pending: Vec<String> = config
-        .applications
+        .projects
         .keys()
-        .filter(|id| state.runs.status(id) == SyncStatus::Unknown)
+        .filter(|id| {
+            state
+                .project_health
+                .get(id)
+                .is_none_or(|h| h.last_success_age_seconds.is_none())
+        })
         .cloned()
         .collect();
     pending.sort();
     Json(ReadyStatus {
         ready: true,
-        applications_total: config.applications.len(),
-        applications_checked: config.applications.len() - pending.len(),
-        applications_pending: pending,
+        projects_total: config.projects.len(),
+        projects_pulled: config.projects.len() - pending.len(),
+        projects_pending: pending,
     })
 }
 

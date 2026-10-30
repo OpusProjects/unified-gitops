@@ -14,13 +14,9 @@ use std::sync::Arc;
 use axum::Router;
 
 use adapters::r#in::http::auth::{Permissions, ResolvedApiKey};
-use adapters::out::connectors::process::ProcessConnector;
 use adapters::out::git::cli::CliGit;
 use adapters::out::secrets::mock::MockSecrets;
 use adapters::out::secrets::reloadable::ReloadableSecrets;
-use adapters::out::state::fs::FsStateStore;
-use domain::app::Application;
-use domain::connector::Connector;
 use domain::credential::Credential;
 use domain::project::GitProject;
 use ports::secrets::SecretsPort;
@@ -31,8 +27,6 @@ use ports::secrets::SecretsPort;
 // pattern: each method consumes self and returns it, so calls can be chained
 // and build() finalizes the construction.
 pub struct AppBuilder {
-    applications: HashMap<String, Application>,
-    connectors: HashMap<String, Connector>,
     projects: HashMap<String, GitProject>,
     credentials: HashMap<String, Credential>,
     webhooks: HashMap<String, domain::webhook::Webhook>,
@@ -48,9 +42,7 @@ pub struct AppBuilder {
     live_settings: Option<config::RestartOnlySettings>,
     api_keys: Vec<ResolvedApiKey>,
     directory: Arc<dyn ports::directory::DirectoryPort>,
-    connector: Arc<dyn ports::connector::ConnectorPort>,
     git: Arc<dyn ports::git::GitPort>,
-    state_dir: std::path::PathBuf,
     project_health: Arc<domain::sync_health::SyncHealthRegistry>,
     cors_allowed_origins: Vec<String>,
     metrics_require_auth: bool,
@@ -62,8 +54,6 @@ pub struct AppBuilder {
 impl AppBuilder {
     pub fn new() -> Self {
         Self {
-            applications: HashMap::new(),
-            connectors: HashMap::new(),
             projects: HashMap::new(),
             credentials: HashMap::new(),
             webhooks: HashMap::new(),
@@ -79,9 +69,7 @@ impl AppBuilder {
             // The real adapter even in tests: it is only called when a test
             // configures LDAP, and those tests swap in a double.
             directory: Arc::new(adapters::out::directory::ldap::LdapDirectory),
-            connector: Arc::new(ProcessConnector::new()),
             git: Arc::new(CliGit::new()),
-            state_dir: std::path::PathBuf::from("state"),
             project_health: Arc::new(domain::sync_health::SyncHealthRegistry::new()),
             cors_allowed_origins: Vec::new(),
             metrics_require_auth: false,
@@ -99,29 +87,7 @@ impl AppBuilder {
         self
     }
 
-    pub fn applications(mut self, applications: HashMap<String, Application>) -> Self {
-        self.applications = applications;
-        self
-    }
-
-    pub fn connectors(mut self, connectors: HashMap<String, Connector>) -> Self {
-        self.connectors = connectors;
-        self
-    }
-
-    // Where the local copy of each system's settings is written.
-    pub fn state_dir(mut self, dir: std::path::PathBuf) -> Self {
-        self.state_dir = dir;
-        self
-    }
-
-    // Test seams: a connector port that keeps objects in memory, a git port
-    // that needs no remote.
-    pub fn connector(mut self, connector: Arc<dyn ports::connector::ConnectorPort>) -> Self {
-        self.connector = connector;
-        self
-    }
-
+    // Test seam: a git port that needs no remote.
     pub fn git(mut self, git: Arc<dyn ports::git::GitPort>) -> Self {
         self.git = git;
         self
@@ -179,14 +145,11 @@ impl AppBuilder {
     // from a config it did not consume either. Cloning a few maps once at
     // boot is not a cost worth a partially-moved struct.
     pub fn from_config(mut self, cfg: &config::AppConfig) -> Self {
-        self.applications = cfg.applications.clone();
-        self.connectors = cfg.connectors.clone();
         self.projects = cfg.projects.clone();
         self.credentials = cfg.credentials.clone();
         self.webhooks = cfg.webhooks.clone();
         self.secrets_settings = cfg.secrets_config.clone();
         self.projects_dir = std::path::PathBuf::from(&cfg.projects_config.dir);
-        self.state_dir = std::path::PathBuf::from(&cfg.state.dir);
         self.ui = cfg.server.ui.clone();
         self.cors_allowed_origins = cfg.server.cors_allowed_origins.clone();
         self.metrics_require_auth = cfg.server.metrics_require_auth;
@@ -269,7 +232,7 @@ impl AppBuilder {
     }
 
     // Also returns the AppState: needed by main (to start the scheduler on the
-    // same state) and by tests that drive a reconcile directly
+    // same state) and by tests that drive a pull directly
     pub fn build_with_state(self) -> (Router<()>, Arc<AppState>) {
         // Install the metrics recorder before anything can record
         adapters::r#in::http::metrics::init();
@@ -280,15 +243,11 @@ impl AppBuilder {
         let reloadable = Arc::new(ReloadableSecrets::new(self.secrets));
 
         let state = Arc::new(AppState {
-            connector: self.connector,
-            store: Arc::new(FsStateStore::new(self.state_dir)),
             secrets: Arc::clone(&reloadable) as Arc<dyn SecretsPort>,
             git: self.git,
             venv: Arc::new(adapters::out::python::PyVenv::new()),
             secrets_swap: reloadable,
             config: std::sync::RwLock::new(Arc::new(RuntimeConfig {
-                applications: self.applications,
-                connectors: self.connectors,
                 projects: self.projects,
                 credentials: self.credentials,
                 webhooks: self.webhooks,
@@ -309,11 +268,7 @@ impl AppBuilder {
             ui: self.ui,
             sessions: std::sync::Arc::new(crate::adapters::r#in::http::session::SessionStore::new()),
             directory: self.directory,
-            runs: Arc::new(domain::run::AppStateRegistry::new()),
-            app_health: Arc::new(domain::sync_health::SyncHealthRegistry::new()),
             project_health: self.project_health,
-            locks: Arc::new(application::reconcile::Locks::new()),
-            described: Arc::new(domain::connector::DescribedKinds::new()),
             started: std::time::Instant::now(),
             login_throttle: Arc::new(crate::application::login::LoginThrottle::default()),
             dispatcher: Arc::new(application::webhooks::Dispatcher::new()),

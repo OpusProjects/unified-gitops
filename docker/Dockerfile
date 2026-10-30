@@ -44,8 +44,8 @@ RUN apt-get update && apt-get install -y \
 
 RUN groupadd -r unified && useradd -r -g unified -s /sbin/nologin unified
 
-# Writable state directory: project checkouts and the local copy of each
-# system's settings. In k8s, mount a volume over it.
+# Writable state directory: project checkouts. In k8s, mount a volume over
+# it.
 RUN mkdir -p /var/lib/unified-gitops && chown unified:unified /var/lib/unified-gitops
 
 COPY --from=builder /app/target/release/unified-gitops /usr/local/bin/unified-gitops

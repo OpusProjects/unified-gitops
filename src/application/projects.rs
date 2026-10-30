@@ -1,14 +1,14 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
 use tokio::sync::RwLock;
 
-use crate::application::reconcile::Catalog;
 use crate::application::webhooks::{Dispatcher, PullEvent, PullOutcome, after_pull};
 use crate::domain::project::GitProject;
 use crate::domain::sync_health::{RunRecord, RunTrigger, SyncHealthRegistry};
-use crate::domain::webhook::Event;
+use crate::domain::webhook::{Event, Webhook};
 use crate::ports::git::{CommitRange, GitPort};
 use crate::ports::secrets::SecretsPort;
 use crate::ports::venv::{VenvOutcome, VenvPort};
@@ -56,7 +56,9 @@ pub fn checkout_lock(dir: &Path) -> Arc<RwLock<()>> {
 #[derive(Clone, Copy)]
 pub struct Announce<'a> {
     pub dispatcher: &'a Dispatcher,
-    pub catalog: &'a Catalog<'a>,
+    pub webhooks: &'a HashMap<String, Webhook>,
+    // server.url, for a link to the project in the UI.
+    pub url: Option<&'a str>,
 }
 
 // A pull that moved the checkout: from which commit, to which, and what came
@@ -106,8 +108,7 @@ pub async fn sync_project(
     let start = std::time::Instant::now();
     // Listing commits can take a fetch: only when someone will read them.
     let list_commits = announce.is_some_and(|a| {
-        a.catalog
-            .webhooks
+        a.webhooks
             .values()
             .any(|w| w.wants_project(Event::CommitPulled, project_id))
     });
@@ -130,37 +131,29 @@ pub async fn sync_project(
         Ok(_) => health.record_success(project_id),
         Err(error) => health.record_failure(project_id, error),
     }
-    // Every application check pulls first, one per application per tick: kept
-    // whole, those pulls would push everything else out of the history within
-    // the hour. One that moved the commit or failed is what a reader looks
-    // for; the rest are in the health above.
-    let worth_keeping = origin.trigger != RunTrigger::Check || result.is_err() || before != after;
-    if worth_keeping {
-        health.record_run(
-            project_id,
-            RunRecord {
-                started_at,
-                duration_ms: start.elapsed().as_millis() as u64,
-                trigger: origin.trigger,
-                by: origin.by,
-                error: result.as_ref().err().cloned(),
-                revision_before: before,
-                revision: after.clone(),
-            },
-        );
-    }
+    health.record_run(
+        project_id,
+        RunRecord {
+            started_at,
+            duration_ms: start.elapsed().as_millis() as u64,
+            trigger: origin.trigger,
+            by: origin.by,
+            error: result.as_ref().err().cloned(),
+            revision_before: before,
+            revision: after.clone(),
+        },
+    );
 
     if let Some(announce) = announce {
         let tell = |revision: Option<&str>, event: PullEvent<'_>| {
             after_pull(
                 announce.dispatcher,
-                announce.catalog.webhooks,
+                announce.webhooks,
                 &PullOutcome {
                     project: project_id,
                     description: project.description.as_deref(),
-                    base_url: announce.catalog.url,
+                    base_url: announce.url,
                     revision,
-                    applications: announce.catalog.applications,
                     event,
                 },
             )
@@ -171,7 +164,7 @@ pub async fn sync_project(
                     tell(
                         after.as_deref(),
                         PullEvent::PullRecovered {
-                            failing_seconds: crate::domain::run::now().saturating_sub(since),
+                            failing_seconds: crate::domain::unix_now().saturating_sub(since),
                         },
                     );
                 }
@@ -365,10 +358,8 @@ async fn commits(
     }
 }
 
-// Every request this instance makes to a git server, as count_call in
-// application::reconcile counts those to the systems: a clone or a pull per
-// project, and the fetch a rollback makes (application::reconcile). What the
-// Overview's repositories chart reads.
+// Every request this instance makes to a git server: a clone or a pull per
+// project. What the Overview's repositories chart reads.
 pub fn count_git_request(
     project_id: &str,
     operation: &'static str,
@@ -615,7 +606,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = project();
 
-        // Five applications on one project, pulling at once.
+        // Five pulls of one project at once.
         let pulls = (0..5).map(|_| {
             sync_project(
                 &git,
@@ -785,83 +776,6 @@ mod tests {
                 (Some("c1".to_string()), Some("c2".to_string())),
             ]
         );
-    }
-
-    // The pull before every application check would fill the history on its
-    // own: one is kept only when it moved the commit or failed. Its health is
-    // recorded either way.
-    #[tokio::test]
-    async fn a_check_pull_is_kept_only_when_it_moved_or_failed() {
-        let health = SyncHealthRegistry::new();
-        let secrets = MockSecrets::new();
-        let venv = StubVenv::default();
-        let dir = std::path::PathBuf::from("unused");
-        let check = RunOrigin::of(RunTrigger::Check);
-
-        // Nothing new: the health says it worked, the history stays empty.
-        sync_project(
-            &StubGit { fail_with: None },
-            &secrets,
-            &venv,
-            &health,
-            "prj-check",
-            &project(),
-            &dir,
-            None,
-            check.clone(),
-        )
-        .await
-        .expect("the stub succeeds");
-        assert!(
-            health
-                .get("prj-check")
-                .is_some_and(|h| h.last_success_age_seconds.is_some())
-        );
-        assert!(health.history("prj-check").is_empty());
-
-        // A failure is kept.
-        sync_project(
-            &StubGit {
-                fail_with: Some("remote unreachable".to_string()),
-            },
-            &secrets,
-            &venv,
-            &health,
-            "prj-check",
-            &project(),
-            &dir,
-            None,
-            check.clone(),
-        )
-        .await
-        .expect_err("the stub fails");
-        assert_eq!(health.history("prj-check").len(), 1);
-
-        // So is a move, with who asked for the check.
-        sync_project(
-            &MovingGit {
-                at: std::sync::Mutex::new("aaa"),
-            },
-            &secrets,
-            &venv,
-            &health,
-            "prj-check",
-            &project(),
-            &dir,
-            None,
-            RunOrigin {
-                trigger: RunTrigger::Check,
-                by: Some("key-ops".into()),
-            },
-        )
-        .await
-        .expect("the stub succeeds");
-        let history = health.history("prj-check");
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].trigger, RunTrigger::Check);
-        assert_eq!(history[0].by.as_deref(), Some("key-ops"));
-        assert_eq!(history[0].revision.as_deref(), Some("bbb"));
-        assert_eq!(history[1].error.as_deref(), Some("remote unreachable"));
     }
 
     #[tokio::test]

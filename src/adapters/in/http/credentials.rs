@@ -80,8 +80,6 @@ pub struct FileKeyInfo {
 pub struct CredentialUsersInfo {
     /// For a `type: vault` credential: the credentials reading from it
     pub credentials: Vec<String>,
-    /// Applications whose connector receives it
-    pub applications: Vec<String>,
     pub projects: Vec<String>,
     /// Webhooks that send with it
     pub webhooks: Vec<String>,
@@ -113,7 +111,6 @@ pub async fn list_credentials(
         let users = users_of(
             id,
             &config.credentials,
-            &config.applications,
             &config.projects,
             &config.webhooks,
             config.ldap.as_ref(),
@@ -177,7 +174,6 @@ pub async fn list_credentials(
             error,
             used_by: CredentialUsersInfo {
                 credentials: users.credentials,
-                applications: users.applications,
                 projects: users.projects,
                 webhooks: users.webhooks,
                 ldap: users.ldap,

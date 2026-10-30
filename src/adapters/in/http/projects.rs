@@ -57,25 +57,8 @@ pub struct ProjectInfo {
 
 #[derive(Serialize, ToSchema)]
 pub struct ProjectUsers {
-    /// Applications whose desired state lives in this checkout
-    pub applications: Vec<String>,
-    /// Connectors whose script is resolved in this checkout
-    pub connectors: Vec<String>,
-}
-
-// Sorted ids of everything in `items` whose project is `project`.
-fn users_of<'a, T: 'a>(
-    items: impl IntoIterator<Item = (&'a String, &'a T)>,
-    project: &str,
-    project_of: impl Fn(&T) -> Option<&str>,
-) -> Vec<String> {
-    let mut ids: Vec<String> = items
-        .into_iter()
-        .filter(|(_, item)| project_of(item) == Some(project))
-        .map(|(id, _)| id.clone())
-        .collect();
-    ids.sort();
-    ids
+    /// Webhooks that tell this project's events
+    pub webhooks: Vec<String>,
 }
 
 #[utoipa::path(
@@ -83,18 +66,13 @@ fn users_of<'a, T: 'a>(
     path = "/api/v1/projects",
     tag = "Projects",
     responses(
-        (status = 200, description = "Configured git projects and their checkout state", body = Vec<ProjectInfo>),
-        (status = 403, description = "API key is not admin", body = ErrorBody)
+        (status = 200, description = "Configured git projects and their checkout state; a restricted caller sees its own", body = Vec<ProjectInfo>)
     )
 )]
 pub async fn list_projects(
     State(state): State<Arc<AppState>>,
     axum::Extension(auth): axum::Extension<AuthContext>,
 ) -> Result<Json<Vec<ProjectInfo>>, ApiError> {
-    if !auth.permissions.is_admin() {
-        return Err(ApiError::admin_only());
-    }
-
     // A loop rather than a map, because `checkout_present` is a filesystem
     // question and it is asked with tokio::fs: `Path::exists` is a blocking
     // syscall, and this handler runs on the runtime. One stat per configured
@@ -106,7 +84,11 @@ pub async fn list_projects(
     // "no checkout", which is what an operator would conclude from it anyway.
     let config = state.config();
     let mut projects: Vec<ProjectInfo> = Vec::with_capacity(config.projects.len());
-    for (id, project) in &config.projects {
+    for (id, project) in config
+        .projects
+        .iter()
+        .filter(|(id, _)| auth.permissions.allows_project(id))
+    {
         let checkout_present = tokio::fs::try_exists(state.projects_dir.join(id).join(".git"))
             .await
             .unwrap_or(false);
@@ -130,8 +112,16 @@ pub async fn list_projects(
             schedule: project.schedule.clone(),
             timeout_seconds: project.timeout_seconds,
             used_by: ProjectUsers {
-                applications: users_of(&config.applications, id, |a| Some(a.project.as_str())),
-                connectors: users_of(&config.connectors, id, |p| p.project.as_deref()),
+                webhooks: {
+                    let mut ids: Vec<String> = config
+                        .webhooks
+                        .iter()
+                        .filter(|(_, w)| w.projects.includes(id))
+                        .map(|(wid, _)| wid.clone())
+                        .collect();
+                    ids.sort();
+                    ids
+                },
             },
             sync_health: state.project_health.get(id).map(Into::into),
             history: state
@@ -164,8 +154,7 @@ pub struct ProjectSyncResult {
     ),
     responses(
         (status = 200, description = "Checkout updated to the branch tip", body = ProjectSyncResult),
-        (status = 403, description = "API key is not admin", body = ErrorBody),
-        (status = 404, description = "Project not configured", body = ErrorBody),
+        (status = 404, description = "Project not configured, or not the caller's", body = ErrorBody),
         (status = 502, description = "git clone/fetch failed", body = ProjectSyncResult)
     )
 )]
@@ -175,17 +164,16 @@ pub async fn sync_project_now(
     Path(id): Path<String>,
     headers: axum::http::HeaderMap,
 ) -> Result<(StatusCode, Json<ProjectSyncResult>), ApiError> {
-    if !auth.permissions.is_admin() {
-        return Err(ApiError::admin_only());
-    }
     let config = state.config();
+    // Another caller's project reads as absent: a restricted key learns
+    // nothing about what it may not touch.
     let project = config
         .projects
         .get(&id)
+        .filter(|_| auth.permissions.allows_project(&id))
         .ok_or_else(|| ApiError::not_found(format!("project '{}' is not configured", id)))?;
 
     let start = Instant::now();
-    let catalog = config.catalog();
     let result = sync_project(
         &*state.git,
         &*state.secrets,
@@ -196,7 +184,8 @@ pub async fn sync_project_now(
         &state.projects_dir,
         Some(crate::application::projects::Announce {
             dispatcher: &state.dispatcher,
-            catalog: &catalog,
+            webhooks: &config.webhooks,
+            url: config.url.as_deref(),
         }),
         crate::application::projects::RunOrigin {
             trigger: crate::domain::sync_health::RunTrigger::Manual,

@@ -1,12 +1,7 @@
 pub mod api_key;
-pub mod app;
-pub mod connector;
 pub mod credential;
-pub mod desired;
 pub mod ldap;
-pub mod plan;
 pub mod project;
-pub mod run;
 pub mod sync_health;
 pub mod webhook;
 pub mod yaml;

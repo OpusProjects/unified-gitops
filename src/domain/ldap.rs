@@ -9,7 +9,7 @@ use crate::domain::api_key::ApiKeyRole;
 //
 // People log in with their directory account; what they may touch is decided
 // HERE, by the `access` rules, in the same vocabulary api_keys.yaml uses
-// (admin, or restricted to listed applications). The directory says
+// (admin, or restricted to listed projects). The directory says
 // who someone is and which groups they belong to; it never decides access on
 // its own, so a new group in AD grants nothing until a rule names it.
 //
@@ -19,7 +19,7 @@ use crate::domain::api_key::ApiKeyRole;
 //
 // The block itself, the directory search and the group matching live in
 // auth-rs, shared with unified-api; what stays here is what only this
-// service has: the rule type (applications) and what it grants.
+// service has: the rule type (projects) and what it grants.
 // The `server.ui.ldap` block, with this service's rules as its `access:`.
 pub type LdapConfig = auth_rs::LdapConfig<AccessRule>;
 
@@ -43,9 +43,9 @@ pub struct AccessRule {
     #[serde(default)]
     pub role: ApiKeyRole,
 
-    // The applications a restricted rule grants, as api_keys.yaml does.
+    // The projects a restricted rule grants, as api_keys.yaml does.
     #[serde(default)]
-    pub applications: Vec<String>,
+    pub projects: Vec<String>,
 }
 
 // What the rules grant one person. Kept free of the HTTP layer's Permissions
@@ -53,13 +53,13 @@ pub struct AccessRule {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Grant {
     Admin,
-    Scoped { applications: HashSet<String> },
+    Scoped { projects: HashSet<String> },
 }
 
 // The rules applied to one authenticated person. None = no rule names them.
 pub fn grant_for(rules: &[AccessRule], username: &str, member_of: &[String]) -> Option<Grant> {
     let mut matched = false;
-    let mut applications = HashSet::new();
+    let mut projects = HashSet::new();
 
     for rule in rules {
         if !rule_names(&rule.users, &rule.groups, username, member_of) {
@@ -69,10 +69,10 @@ pub fn grant_for(rules: &[AccessRule], username: &str, member_of: &[String]) -> 
             return Some(Grant::Admin);
         }
         matched = true;
-        applications.extend(rule.applications.iter().cloned());
+        projects.extend(rule.projects.iter().cloned());
     }
 
-    matched.then_some(Grant::Scoped { applications })
+    matched.then_some(Grant::Scoped { projects })
 }
 
 // What the shared login use case asks of this service's rules.
@@ -94,7 +94,7 @@ mod tests {
             groups: Vec::new(),
             users: Vec::new(),
             role,
-            applications: Vec::new(),
+            projects: Vec::new(),
         }
     }
 
@@ -128,16 +128,16 @@ mod tests {
     fn scoped_rules_union_and_admin_wins() {
         let mut vmware = rule("vmware", ApiKeyRole::Restricted);
         vmware.users = vec!["JDoe".to_string()];
-        vmware.applications = vec!["app-vmware".to_string()];
+        vmware.projects = vec!["prj-vmware".to_string()];
         let mut d42 = rule("d42", ApiKeyRole::Restricted);
         d42.groups = vec!["DL-pcol2operations".to_string()];
-        d42.applications = vec!["app-d42".to_string()];
+        d42.projects = vec!["prj-d42".to_string()];
 
         let grant = grant_for(&[vmware.clone(), d42.clone()], "jdoe", &[OPS.to_string()]);
-        let Some(Grant::Scoped { applications }) = grant else {
+        let Some(Grant::Scoped { projects }) = grant else {
             panic!("expected a scoped grant, got {grant:?}");
         };
-        assert!(applications.contains("app-vmware") && applications.contains("app-d42"));
+        assert!(projects.contains("prj-vmware") && projects.contains("prj-d42"));
 
         let mut admins = rule("admins", ApiKeyRole::Admin);
         admins.users = vec!["jdoe".to_string()];

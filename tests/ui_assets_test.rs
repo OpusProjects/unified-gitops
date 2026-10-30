@@ -109,7 +109,7 @@ async fn an_unknown_api_path_is_still_a_json_404() {
 async fn the_api_answers_as_before() {
     let served = app(true);
     let (status, content_type, _, body) =
-        get(&served.app, "/api/v1/applications", "application/json").await;
+        get(&served.app, "/api/v1/projects", "application/json").await;
     assert_eq!(status, StatusCode::OK);
     assert!(content_type.starts_with("application/json"));
     assert!(body.starts_with('['));
@@ -177,7 +177,7 @@ async fn a_signed_out_browser_goes_to_the_login_form_before_the_app_loads() {
     let resp = app
         .clone()
         .oneshot(
-            Request::get("/applications/demo?x=1")
+            Request::get("/projects/demo?x=1")
                 .header(header::ACCEPT, BROWSER)
                 .body(Body::empty())
                 .unwrap(),
@@ -187,7 +187,7 @@ async fn a_signed_out_browser_goes_to_the_login_form_before_the_app_loads() {
     assert!(resp.status().is_redirection(), "{}", resp.status());
     assert_eq!(
         resp.headers()[header::LOCATION],
-        "/api/v1/login?next=/applications/demo%3Fx%3D1"
+        "/api/v1/login?next=/projects/demo%3Fx%3D1"
     );
 
     // The app's files are not gated.
