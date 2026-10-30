@@ -47,8 +47,6 @@ pub use web_rs::config::{
 
 #[derive(Serialize, ToSchema)]
 pub struct ConfigSummary {
-    pub applications: usize,
-    pub connectors: usize,
     pub credentials: usize,
     pub projects: usize,
     pub api_keys: usize,
@@ -74,8 +72,6 @@ pub struct ReloadInfo {
     /// means the write landed and part of it is waiting for one
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub restart_required: Vec<String>,
-    pub applications: DeltaInfo,
-    pub connectors: DeltaInfo,
     pub projects: DeltaInfo,
     pub credentials: DeltaInfo,
     pub webhooks: DeltaInfo,
@@ -104,8 +100,6 @@ fn swap_keys(state: &AppState, keys: &ApiKeys, resolved: Vec<ResolvedApiKey>) ->
 
 fn summarize(cfg: &AppConfig) -> ConfigSummary {
     ConfigSummary {
-        applications: cfg.applications.len(),
-        connectors: cfg.connectors.len(),
         credentials: cfg.credentials.len(),
         projects: cfg.projects.len(),
         api_keys: cfg.api_keys.len(),
@@ -118,8 +112,6 @@ fn reload_info(report: &reload_use_case::ReloadReport, api_keys: usize) -> Reloa
         generation: report.generation,
         applied: report.applied.clone(),
         restart_required: report.restart_required.clone(),
-        applications: (&report.applications).into(),
-        connectors: (&report.connectors).into(),
         projects: (&report.projects).into(),
         credentials: (&report.credentials).into(),
         webhooks: (&report.webhooks).into(),
@@ -253,7 +245,7 @@ pub async fn get_config(
     get,
     path = "/api/v1/config/{file}",
     tag = "Configuration",
-    params(("file" = String, Path, description = "Path inside the configuration directory, e.g. applications/storage/isilon-prod.yaml (slashes allowed)")),
+    params(("file" = String, Path, description = "Path inside the configuration directory, e.g. webhooks/team-a/notify.yaml (slashes allowed)")),
     responses(
         (status = 200, description = "The file, verbatim. The ETag is the sha256 of the bytes — send it back as If-Match to write safely", body = String, content_type = "application/yaml"),
         (status = 304, description = "If-None-Match matched: unchanged"),
@@ -284,7 +276,7 @@ pub async fn get_config_file(
     path = "/api/v1/config/{file}",
     tag = "Configuration",
     params(
-        ("file" = String, Path, description = "Path inside the configuration directory, e.g. applications/storage/isilon-prod.yaml (slashes allowed)"),
+        ("file" = String, Path, description = "Path inside the configuration directory, e.g. webhooks/team-a/notify.yaml (slashes allowed)"),
         ("reload" = Option<bool>, Query, description = "Apply to the running process as part of the write")
     ),
     request_body(content = String, description = "The file's new contents, verbatim YAML", content_type = "application/yaml"),
@@ -318,7 +310,7 @@ pub async fn put_config_file(
     path = "/api/v1/config/{file}",
     tag = "Configuration",
     params(
-        ("file" = String, Path, description = "Path inside the configuration directory, e.g. applications/storage/isilon-prod.yaml (slashes allowed)"),
+        ("file" = String, Path, description = "Path inside the configuration directory, e.g. webhooks/team-a/notify.yaml (slashes allowed)"),
         ("reload" = Option<bool>, Query, description = "Apply to the running process as part of the delete")
     ),
     responses(

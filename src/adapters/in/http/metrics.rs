@@ -129,7 +129,7 @@ pub async fn metrics(
         }
     }
 
-    record_application_gauges(&state);
+    record_project_gauges(&state);
     record_config_gauges(&state);
     record_process_gauges();
     Ok(handle().render())
@@ -269,54 +269,16 @@ fn record_config_gauges(state: &AppState) {
         .set(state.restart_pending().len() as f64);
 }
 
-// Where every application stands, refreshed on every scrape.
+// Where every project's pulls stand, refreshed on every scrape.
 //
-// Scrape-time rather than pushed after each run, like unified-api's freshness
+// Scrape-time rather than pushed after each pull, like unified-api's freshness
 // gauges and for the same reason: ages grow with the clock, and a task that
 // stops running pushes nothing — only a clock-driven gauge shows its silence.
-// Keyed by the CONFIGURED ids, so a removed application stops being re-set.
+// Keyed by the CONFIGURED ids, so a removed project stops being re-set.
 // (`last_error` stays API-only: an error string as a label value is unbounded
 // cardinality.)
-fn record_application_gauges(state: &AppState) {
-    use crate::domain::run::SyncStatus;
+fn record_project_gauges(state: &AppState) {
     let config = state.config();
-    for app_id in config.applications.keys() {
-        let run = state.runs.get(app_id);
-        let current = state.application_status(app_id);
-        // One series per status with value 1 on the current one: the
-        // standard way to export an enum, so `== 1` alerts read naturally.
-        for (status, name) in [
-            (SyncStatus::Synced, "synced"),
-            (SyncStatus::OutOfSync, "out_of_sync"),
-            (SyncStatus::Failed, "failed"),
-            (SyncStatus::Unknown, "unknown"),
-            (SyncStatus::RolledBack, "rolled_back"),
-        ] {
-            metrics::gauge!("unified_gitops_application_status", "application" => app_id.clone(), "status" => name)
-                .set(if current == status { 1.0 } else { 0.0 });
-        }
-        if let Some(plan) = &run.plan {
-            metrics::gauge!("unified_gitops_application_pending_operations", "application" => app_id.clone())
-                .set(plan.operations.len() as f64);
-            metrics::gauge!("unified_gitops_application_unmanaged_objects", "application" => app_id.clone())
-                .set(plan.unmanaged.len() as f64);
-        }
-        // The latest run of any kind, as the API reports it: a run that failed
-        // before it could plan (invalid desired state) was still a check.
-        if let Some(last) = run.history.first() {
-            metrics::gauge!("unified_gitops_application_last_check_age_seconds", "application" => app_id.clone())
-                .set(crate::domain::run::now().saturating_sub(last.finished_at) as f64);
-        }
-        if let Some(health) = state.app_health.get(app_id) {
-            metrics::gauge!("unified_gitops_application_consecutive_failures", "application" => app_id.clone())
-                .set(health.consecutive_failures as f64);
-            if let Some(age) = health.last_success_age_seconds {
-                metrics::gauge!("unified_gitops_application_last_success_age_seconds", "application" => app_id.clone())
-                    .set(age as f64);
-            }
-        }
-    }
-
     for project_id in config.projects.keys() {
         if let Some(health) = state.project_health.get(project_id) {
             metrics::gauge!("unified_gitops_project_sync_consecutive_failures", "project" => project_id.clone())

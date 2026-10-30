@@ -28,7 +28,6 @@ pub struct Settings {
     /// How long this process has been running
     pub uptime_seconds: u64,
     pub server: ServerSettings,
-    pub state: StateSettings,
     pub projects: ProjectsSettings,
     pub secrets: SecretsSettings,
     pub config_api: ConfigApiSettings,
@@ -59,13 +58,6 @@ pub struct UiSettings {
     /// Whether directory (LDAP) login is configured; its details are on
     /// GET /api/v1/auth
     pub ldap: bool,
-}
-
-#[derive(Serialize, ToSchema)]
-pub struct StateSettings {
-    /// Where the local copy of each system's current settings is written
-    /// (restart-only)
-    pub dir: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -138,9 +130,6 @@ pub async fn get_settings(
                 session_ttl_seconds: state.ui.session_ttl_seconds,
                 ldap: config.ldap.is_some(),
             },
-        },
-        state: StateSettings {
-            dir: boot.as_ref().map(|b| b.state_dir.clone()),
         },
         projects: ProjectsSettings {
             dir: boot.as_ref().map(|b| b.projects_dir.clone()),

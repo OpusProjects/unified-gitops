@@ -29,11 +29,8 @@ async fn main() {
                     println!("deprecated: {notice}");
                 }
                 println!(
-                    "configuration OK ({}): {} applications, {} connectors, \
-                     {} credentials, {} projects, {} webhooks",
+                    "configuration OK ({}): {} credentials, {} projects, {} webhooks",
                     config_dir,
-                    cfg.applications.len(),
-                    cfg.connectors.len(),
                     cfg.credentials.len(),
                     cfg.projects.len(),
                     cfg.webhooks.len(),
@@ -102,8 +99,7 @@ async fn main() {
     }
 
     info!(
-        applications = cfg.applications.len(),
-        connectors = cfg.connectors.len(),
+        webhooks = cfg.webhooks.len(),
         credentials = cfg.credentials.len(),
         projects = cfg.projects.len(),
         api_keys = api_keys.len(),
@@ -174,9 +170,8 @@ async fn main() {
     // The rest of the boot happens BEHIND the listener: project checkouts and
     // the sync schedulers must never gate /healthz. One unreachable git remote
     // used to mean the listener never bound at all — a failed startup probe
-    // for a service whose HTTP layer was perfectly able to serve. Script paths
-    // resolve per execution (application::scripts), so nothing here depends on
-    // the checkouts existing before the router does.
+    // for a service whose HTTP layer was perfectly able to serve. Nothing
+    // here depends on the checkouts existing before the router does.
     {
         let state = std::sync::Arc::clone(&state);
         let secrets = std::sync::Arc::clone(&secrets);
@@ -223,7 +218,6 @@ async fn main() {
                         // A pull at boot tells what it brought too: commits
                         // pushed while this instance was down.
                         let config = state.config();
-                        let catalog = config.catalog();
                         match unified_gitops::application::projects::sync_project(
                             &*git,
                             &*secrets,
@@ -234,7 +228,8 @@ async fn main() {
                             &projects_dir,
                             Some(unified_gitops::application::projects::Announce {
                                 dispatcher: &state.dispatcher,
-                                catalog: &catalog,
+                                webhooks: &config.webhooks,
+                                url: config.url.as_deref(),
                             }),
                             unified_gitops::application::projects::RunOrigin::of(
                                 unified_gitops::domain::sync_health::RunTrigger::Startup,
@@ -271,11 +266,11 @@ async fn main() {
                 return;
             }
             // After the boot clones had their chance (bounded by their
-            // timeouts), so an application's first check does not race its
-            // own checkout's clone and fail for no reason but start order.
+            // timeouts), so a project's first scheduled pull does not race
+            // its own clone for no reason but start order.
             //
             // One supervisor rather than the task handles directly: it owns
-            // every periodic task (application checks, project pulls) and
+            // every periodic task (project pulls) and
             // replaces the whole set when a configuration reload lands.
             let supervisor =
                 unified_gitops::adapters::r#in::scheduler::start_supervisor(state, shutdown_rx);
@@ -298,7 +293,7 @@ async fn main() {
 
     // Drain the background tasks: signal them, then wait — bounded by
     // shutdown_grace_seconds — for in-flight runs to finish. Past the grace
-    // the process exits anyway: blocking on a wedged connector would only trade
+    // the process exits anyway: blocking on a wedged pull would only trade
     // a clean exit for a SIGKILL.
     let shutdown_started = std::time::Instant::now();
     let _ = shutdown_tx.send(true);

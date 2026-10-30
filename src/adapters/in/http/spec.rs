@@ -51,8 +51,8 @@ mod tests {
     // attribute is readable from here.
     #[test]
     fn a_route_carries_its_documentation_from_the_spec() {
-        let doc = lookup("/api/v1/applications/app-a/sync", "POST").expect("a route");
-        assert_eq!(doc.template, "/api/v1/applications/{id}/sync");
+        let doc = lookup("/api/v1/webhooks/w/test", "POST").expect("a route");
+        assert_eq!(doc.template, "/api/v1/webhooks/{id}/test");
         assert!(doc.methods.contains(&"POST"));
         assert!(
             doc.parameters
@@ -76,19 +76,19 @@ mod tests {
 
     #[test]
     fn no_route_here_pages() {
-        assert!(!accepts_limit("/api/v1/applications"));
-        assert!(!accepts_limit("/api/v1/applications/app-a"));
+        assert!(!accepts_limit("/api/v1/webhooks"));
+        assert!(!accepts_limit("/api/v1/webhooks/w"));
     }
 
     #[test]
     fn only_gettable_paths_are_linkable() {
-        assert!(is_gettable("/api/v1/applications"));
-        assert!(is_gettable("/api/v1/applications/app-a"));
-        assert!(is_gettable("/api/v1/applications/store/state/entry"));
+        assert!(is_gettable("/api/v1/webhooks"));
+        assert!(is_gettable("/api/v1/webhooks/w"));
+        assert!(is_gettable("/api/v1/config/a/b.yaml"));
         // POST-only: a link here could only ever 405
-        assert!(!is_gettable("/api/v1/applications/app-a/sync"));
+        assert!(!is_gettable("/api/v1/webhooks/w/test"));
         // Not a route at all
-        assert!(!is_gettable("/api/v1/applications/app-a/run"));
+        assert!(!is_gettable("/api/v1/webhooks/w/run"));
     }
 }
 
@@ -109,25 +109,23 @@ mod action_tests {
     use super::*;
 
     #[test]
-    fn an_application_offers_refresh_and_sync() {
-        let actions = actions("/api/v1/applications/{id}");
-        for suffix in ["/refresh", "/sync"] {
-            let action = actions
-                .iter()
-                .find(|a| a.suffix == suffix)
-                .unwrap_or_else(|| panic!("{suffix} action"));
-            assert_eq!(action.method, "POST");
-        }
+    fn a_webhook_offers_its_test() {
+        let actions = actions("/api/v1/webhooks/{id}");
+        let action = actions
+            .iter()
+            .find(|a| a.suffix == "/test")
+            .expect("/test action");
+        assert_eq!(action.method, "POST");
     }
 
     // A child that needs a path parameter we cannot fill belongs elsewhere.
     #[test]
     fn a_child_with_a_new_capture_is_not_an_action() {
-        assert!(actions("/api/v1/applications").is_empty());
+        assert!(actions("/api/v1/webhooks").is_empty());
     }
 
     #[test]
     fn a_read_only_route_offers_nothing() {
-        assert!(actions("/api/v1/applications/{id}/state/{kind}").is_empty());
+        assert!(actions("/api/v1/credentials").is_empty());
     }
 }

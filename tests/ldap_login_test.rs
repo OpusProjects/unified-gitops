@@ -46,7 +46,7 @@ fn ldap() -> LdapConfig {
         groups: vec![group.to_string()],
         users: Vec::new(),
         role,
-        applications: sources.iter().map(|s| s.to_string()).collect(),
+        projects: sources.iter().map(|s| s.to_string()).collect(),
     };
     LdapConfig {
         url: "ldaps://ldap.example.com".to_string(),
@@ -213,12 +213,14 @@ async fn a_restricted_member_sees_only_themselves_and_their_scope() {
 
     let (_, auth) = get_json(&app, "/api/v1/auth", &session).await;
     assert_eq!(auth["me"]["role"], "restricted");
-    assert_eq!(auth["me"]["applications"][0], "src-vmware");
+    assert_eq!(auth["me"]["projects"][0], "src-vmware");
     assert!(auth.get("ldap").is_none(), "the rules are an admin's map");
     assert!(auth.get("api_keys").is_none());
 
-    let (status, _) = get_json(&app, "/api/v1/projects", &session).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    // Their projects only: none of this app's projects is theirs.
+    let (status, projects) = get_json(&app, "/api/v1/projects", &session).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(projects, serde_json::json!([]));
 }
 
 #[tokio::test]
@@ -413,7 +415,7 @@ async fn a_session_learns_its_csrf_token_from_auth_and_writes_with_it() {
         .to_string();
 
     let sync = |csrf: Option<&str>| {
-        let mut request = Request::post("/api/v1/applications/app-unknown/sync")
+        let mut request = Request::post("/api/v1/projects/prj-unknown/sync")
             .header(header::COOKIE, format!("ugitops_session={session}"));
         if let Some(csrf) = csrf {
             request = request.header("x-csrf-token", csrf);
@@ -421,7 +423,7 @@ async fn a_session_learns_its_csrf_token_from_auth_and_writes_with_it() {
         app.clone().oneshot(request.body(Body::empty()).unwrap())
     };
     assert_eq!(sync(None).await.unwrap().status(), StatusCode::FORBIDDEN);
-    // Past the CSRF check: refused only because the application does not exist.
+    // Past the CSRF check: refused only because the project does not exist.
     assert_eq!(
         sync(Some(&token)).await.unwrap().status(),
         StatusCode::NOT_FOUND

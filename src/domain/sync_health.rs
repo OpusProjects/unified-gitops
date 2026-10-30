@@ -22,14 +22,12 @@ pub struct SyncHealth {
     pub consecutive_failures: u32,
 }
 
-// What started a pull: the timer, a person (Pull, the API), a check or sync
-// of an application (each pulls its project first), or the process itself
+// What started a pull: the timer, a person (Pull, the API), or the process itself
 // (the clones at boot, a project added by a reload).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunTrigger {
     Scheduled,
     Manual,
-    Check,
     Startup,
 }
 
@@ -38,7 +36,6 @@ impl RunTrigger {
         match self {
             RunTrigger::Scheduled => "scheduled",
             RunTrigger::Manual => "manual",
-            RunTrigger::Check => "check",
             RunTrigger::Startup => "startup",
         }
     }

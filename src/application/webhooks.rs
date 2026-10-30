@@ -9,8 +9,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{Semaphore, mpsc};
 use utoipa::ToSchema;
 
-use crate::domain::app::Application;
-use crate::domain::run::{Baseline, RunMode, RunRecord, RunResult, SyncStatus, Trigger, now};
+use crate::domain::unix_now as now;
 use crate::domain::webhook::{
     Auth, AuthScheme, Event, HttpTarget, JobTemplateTarget, Webhook, WebhookType,
 };
@@ -18,231 +17,27 @@ use crate::ports::git::CommitRange;
 use crate::ports::http_sender::{HttpSenderPort, OutboundRequest, OutboundResponse, SendError};
 use crate::ports::secrets::SecretsPort;
 
-// The use case "tell someone what happened to an application, or to the
-// checkout of a project".
+// The use case "tell someone what happened to the checkout of a project".
 //
-// After every run, `detect` compares where the application stood before it
-// (its Baseline) with what the run found and did, and names at most one
-// event: one message per run, never "drift" and "synced" for the same
-// change. Webhooks that want that event are queued; a worker sends
-// them, so a slow receiver never holds up a run.
+// After every pull, the project's event (if any) is queued for the webhooks
+// that want it; a worker sends them, so a slow receiver never holds up a
+// pull.
 
-// Why a sync changed something.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Cause {
-    // A commit the system did not have yet.
-    Commit,
-    // Something changed on the system outside git, at a commit already applied.
-    Drift,
-    // An older commit, applied on purpose.
-    Rollback,
-}
-
-impl Cause {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Cause::Commit => "commit",
-            Cause::Drift => "drift",
-            Cause::Rollback => "rollback",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Detected {
-    pub event: Event,
-    pub cause: Option<Cause>,
-    // drift_detected only: whether this same run put the system back.
-    pub reverted: Option<bool>,
-}
-
-impl Detected {
-    fn new(event: Event, cause: Option<Cause>, reverted: Option<bool>) -> Self {
-        Self {
-            event,
-            cause,
-            reverted,
-        }
-    }
-}
-
-// The event one run produced, if any. Events that describe a state
-// (out_of_sync, sync_failed, back_in_sync, an unreverted drift) fire when the
-// state is entered, not on every check that finds it still there; events that
-// describe something done (sync_succeeded, a reverted drift) fire every time.
-//
-// Drift and commits are told apart by the tree of the application's own
-// folder (RunRecord::tree), not by the repository's commit: a commit to
-// another application's folder changes nothing here. With no tree to compare
-// (the checkout is not git, or git could not answer), the cause is unknown.
-//
-// A baseline of Unknown (first run since the process started: history is in
-// memory) fires only failures and applied changes, so a restart does not
-// report every pending difference again. While a rollback stands, scheduled
-// checks report only failures: they compare the system with HEAD on purpose,
-// and what they find is the rollback.
-pub fn detect(before: &Baseline, record: &RunRecord, status: SyncStatus) -> Option<Detected> {
-    let known = record.tree.is_some();
-    let unchanged_in_git = known && record.tree == before.synced_tree;
-    let entered = matches!(before.status, SyncStatus::Synced | SyncStatus::Failed);
-
-    if matches!(record.result, RunResult::Failed | RunResult::Partial)
-        || status == SyncStatus::Failed
-    {
-        return (before.status != SyncStatus::Failed)
-            .then(|| Detected::new(Event::SyncFailed, None, None));
-    }
-
-    if before.rolled_back && record.trigger == Trigger::Schedule {
-        return None;
-    }
-
-    let applied = record.applied.iter().filter(|a| a.ok).count();
-    if record.mode == RunMode::Apply && applied > 0 {
-        let cause = if record.trigger == Trigger::Rollback {
-            Some(Cause::Rollback)
-        } else if unchanged_in_git {
-            Some(Cause::Drift)
-        } else if known {
-            Some(Cause::Commit)
-        } else {
-            None
-        };
-        return Some(match cause {
-            Some(Cause::Drift) => Detected::new(Event::DriftDetected, cause, Some(true)),
-            _ => Detected::new(Event::SyncSucceeded, cause, None),
-        });
-    }
-
-    match status {
-        SyncStatus::OutOfSync if unchanged_in_git => {
-            entered.then(|| Detected::new(Event::DriftDetected, Some(Cause::Drift), Some(false)))
-        }
-        SyncStatus::OutOfSync => {
-            entered.then(|| Detected::new(Event::OutOfSync, known.then_some(Cause::Commit), None))
-        }
-        SyncStatus::Synced => matches!(before.status, SyncStatus::Failed | SyncStatus::OutOfSync)
-            .then(|| Detected::new(Event::BackInSync, None, None)),
-        _ => None,
-    }
-}
-
-// How many error lines a message carries, and how long each may be: enough
-// to say why, not a script's whole stderr.
-const MESSAGE_ERRORS: usize = 5;
+// How much of a failure a message carries.
 const MESSAGE_ERROR_CHARS: usize = 500;
-
-pub struct RunOutcome<'a> {
-    pub application: &'a str,
-    // The project it reads from: what a webhook's `projects:` matches.
-    pub project: &'a str,
-    pub description: Option<&'a str>,
-    // server.url, for a link to the application in the UI.
-    pub base_url: Option<&'a str>,
-    pub before: &'a Baseline,
-    pub status: SyncStatus,
-    pub record: &'a RunRecord,
-    pub detected: &'a Detected,
-}
-
-// The default message: what happened, to which application, at which commit,
-// and which objects changed (kind, key, operation and the NAMES of changed
-// fields). Never a field's value: a value can be a secret, and the message
-// leaves this process.
-pub fn message(o: &RunOutcome<'_>) -> Map<String, Value> {
-    let record = o.record;
-    let fields_of = |kind: &str, key: &str| -> Vec<String> {
-        record
-            .operations
-            .iter()
-            .find(|op| op.kind == kind && op.key == key)
-            .map(|op| op.changes.iter().map(|c| c.field.clone()).collect())
-            .unwrap_or_default()
-    };
-    let changes: Vec<Value> = if record.mode == RunMode::Apply && !record.applied.is_empty() {
-        record
-            .applied
-            .iter()
-            .map(|a| {
-                json!({
-                    "kind": a.kind,
-                    "key": a.key,
-                    "op": a.op.as_str(),
-                    "fields": fields_of(&a.kind, &a.key),
-                    "ok": a.ok,
-                })
-            })
-            .collect()
-    } else {
-        record
-            .operations
-            .iter()
-            .map(|op| {
-                json!({
-                    "kind": op.kind,
-                    "key": op.key,
-                    "op": op.op.as_str(),
-                    "fields": op.changes.iter().map(|c| c.field.clone()).collect::<Vec<_>>(),
-                })
-            })
-            .collect()
-    };
-    let errors: Vec<String> = record
-        .errors
-        .iter()
-        .take(MESSAGE_ERRORS)
-        .map(|e| e.chars().take(MESSAGE_ERROR_CHARS).collect())
-        .collect();
-    let mut m = Map::new();
-    m.insert("event".into(), json!(o.detected.event.as_str()));
-    m.insert("application".into(), json!(o.application));
-    m.insert("project".into(), json!(o.project));
-    m.insert("description".into(), json!(o.description));
-    m.insert("status".into(), json!(o.status));
-    m.insert("previous_status".into(), json!(o.before.status));
-    m.insert("cause".into(), json!(o.detected.cause.map(Cause::as_str)));
-    m.insert("reverted".into(), json!(o.detected.reverted));
-    m.insert("revision".into(), json!(record.revision));
-    m.insert(
-        "applied".into(),
-        json!(record.applied.iter().filter(|a| a.ok).count()),
-    );
-    m.insert("changes".into(), Value::Array(changes));
-    m.insert("errors".into(), json!(errors));
-    m.insert("at".into(), json!(rfc3339(record.finished_at)));
-    m.insert(
-        "url".into(),
-        json!(
-            o.base_url
-                .map(|base| format!("{base}/applications/{}", o.application))
-        ),
-    );
-    m
-}
 
 // The message a "Send test" sends: the real shape, marked as a test.
 pub fn test_message(webhook_id: &str, base_url: Option<&str>) -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("event".into(), json!("test"));
-    m.insert("application".into(), Value::Null);
     m.insert("project".into(), Value::Null);
     m.insert(
         "description".into(),
         json!(format!("Test of webhook {webhook_id}")),
     );
-    for key in [
-        "status",
-        "previous_status",
-        "cause",
-        "reverted",
-        "revision",
-        "url",
-    ] {
+    for key in ["revision", "url"] {
         m.insert(key.into(), Value::Null);
     }
-    m.insert("applied".into(), json!(0));
-    m.insert("changes".into(), json!([]));
-    m.insert("errors".into(), json!([]));
     m.insert("at".into(), json!(rfc3339(now())));
     if let Some(base) = base_url {
         m.insert("url".into(), json!(base));
@@ -557,9 +352,7 @@ fn hex(bytes: &[u8]) -> String {
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct Delivery {
     pub event: String,
-    pub application: Option<String>,
-    // The project it was about: a project event's own, or the project the
-    // application reads from.
+    // The project it was about; none for a test send.
     pub project: Option<String>,
     // Unix seconds.
     pub at: u64,
@@ -731,11 +524,6 @@ pub async fn deliver(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let application = job
-        .message
-        .get("application")
-        .and_then(Value::as_str)
-        .map(str::to_string);
     let project = job
         .message
         .get("project")
@@ -743,7 +531,6 @@ pub async fn deliver(
         .map(str::to_string);
     let mut delivery = Delivery {
         event: event.clone(),
-        application,
         project,
         at: now(),
         ok: false,
@@ -847,28 +634,6 @@ fn count(webhook_id: &str, event: &str, outcome: &'static str) {
     .increment(1);
 }
 
-// After a run: names its event, if any, and queues it for every webhook
-// that wants it from this application.
-pub fn after_run(
-    dispatcher: &Dispatcher,
-    webhooks: &HashMap<String, Webhook>,
-    outcome: &RunOutcome<'_>,
-) {
-    if webhooks.is_empty() {
-        return;
-    }
-    let event = outcome.detected.event;
-    let mut wanted: Vec<(&String, &Webhook)> = webhooks
-        .iter()
-        .filter(|(_, n)| n.wants(event, outcome.application, outcome.project))
-        .collect();
-    if wanted.is_empty() {
-        return;
-    }
-    wanted.sort_by(|a, b| a.0.cmp(b.0));
-    send_to(dispatcher, wanted, message(outcome));
-}
-
 fn send_to(dispatcher: &Dispatcher, wanted: Vec<(&String, &Webhook)>, base: Map<String, Value>) {
     for (id, webhook) in wanted {
         let mut m = base.clone();
@@ -882,8 +647,7 @@ fn send_to(dispatcher: &Dispatcher, wanted: Vec<(&String, &Webhook)>, base: Map<
 }
 
 // Projects whose pulls are failing, and since when (unix seconds). A failure
-// is told when a project starts failing and a success when it stops, the
-// same rule as an application's sync_failed and back_in_sync. Kept apart
+// is told when a project starts failing and a success when it stops. Kept apart
 // from the project's sync_health on purpose: health counts every attempt,
 // this remembers what was TOLD, so a failure before the webhooks could send
 // (or before a webhook asked for it) still ends in a recovery that matches.
@@ -944,8 +708,6 @@ pub struct PullOutcome<'a> {
     pub base_url: Option<&'a str>,
     // The commit the checkout is at now.
     pub revision: Option<&'a str>,
-    // The configured applications, to name those a commit touched.
-    pub applications: &'a HashMap<String, Application>,
     pub event: PullEvent<'a>,
 }
 
@@ -953,39 +715,17 @@ pub struct PullOutcome<'a> {
 // say what changed, not a changelog.
 pub const MESSAGE_COMMITS: usize = 20;
 const MESSAGE_SUBJECT_CHARS: usize = 200;
+// Changed paths listed in one message: a reformat of the whole repository
+// would otherwise make it as large as the tree.
+const MESSAGE_FILES: usize = 200;
 
-// The applications reading from `project` whose folder holds one of `paths`.
-// An application at the repository's root takes every path.
-pub fn touched_applications(
-    applications: &HashMap<String, Application>,
-    project: &str,
-    paths: &[String],
-) -> Vec<String> {
-    let mut touched: Vec<String> = applications
-        .iter()
-        .filter(|(_, app)| app.project == project)
-        .filter(|(_, app)| {
-            let folder = app.folder().trim_start_matches("./");
-            folder == "."
-                || paths.iter().any(|p| {
-                    p.strip_prefix(folder)
-                        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-                })
-        })
-        .map(|(id, _)| id.clone())
-        .collect();
-    touched.sort();
-    touched
-}
-
-// A project event's message: the same envelope as an application's (event,
+// A project event's message: the envelope every event has (event, project,
 // description, revision, at, url, webhook), with what the event adds. Commit
 // authors and subjects leave this process, as in any git host's push
 // webhook; file contents never do.
 pub fn pull_message(o: &PullOutcome<'_>) -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("event".into(), json!(o.event.event().as_str()));
-    m.insert("application".into(), Value::Null);
     m.insert("project".into(), json!(o.project));
     m.insert("description".into(), json!(o.description));
     m.insert("revision".into(), json!(o.revision));
@@ -1014,12 +754,14 @@ pub fn pull_message(o: &PullOutcome<'_>) -> Map<String, Value> {
                 json!(range.is_none_or(|r| r.more || r.commits.len() > MESSAGE_COMMITS)),
             );
             m.insert("forced".into(), json!(range.is_some_and(|r| r.forced)));
+            // The paths the commits touched; null when git could not list
+            // them.
             m.insert(
-                "applications".into(),
+                "files".into(),
                 json!(
                     range
                         .and_then(|r| r.paths.as_deref())
-                        .map(|paths| touched_applications(o.applications, o.project, paths))
+                        .map(|paths| { paths.iter().take(MESSAGE_FILES).collect::<Vec<_>>() })
                 ),
             );
         }
@@ -1068,262 +810,14 @@ pub fn after_pull(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::plan::{Change, OpKind, Operation};
-    use crate::domain::run::AppliedOperation;
-
-    // `synced`: the tree of the application's folder when it was last in sync.
-    fn baseline(status: SyncStatus, synced: Option<&str>) -> Baseline {
-        Baseline {
-            status,
-            synced_tree: synced.map(str::to_string),
-            rolled_back: false,
-        }
-    }
-
-    // `tree`: the folder's tree this run read (its commit is made up).
-    fn record(mode: RunMode, trigger: Trigger, result: RunResult, tree: &str) -> RunRecord {
-        RunRecord {
-            id: 1,
-            trigger,
-            mode,
-            result,
-            started_at: 0,
-            finished_at: 1_700_000_000,
-            revision: Some(format!("commit-of-{tree}")),
-            tree: Some(tree.to_string()),
-            planned: 0,
-            operations: Vec::new(),
-            applied: Vec::new(),
-            errors: Vec::new(),
-        }
-    }
-
-    fn applied(ok: bool) -> AppliedOperation {
-        AppliedOperation {
-            kind: "user".into(),
-            key: "jane".into(),
-            op: OpKind::Update,
-            ok,
-            error: None,
-        }
-    }
-
-    fn event(d: Option<Detected>) -> Option<(Event, Option<Cause>, Option<bool>)> {
-        d.map(|d| (d.event, d.cause, d.reverted))
-    }
-
-    #[test]
-    fn a_change_from_git_applied_is_sync_succeeded_with_cause_commit() {
-        let mut r = record(RunMode::Apply, Trigger::Schedule, RunResult::Succeeded, "b");
-        r.applied.push(applied(true));
-        let d = detect(
-            &baseline(SyncStatus::Synced, Some("a")),
-            &r,
-            SyncStatus::Synced,
-        );
-        assert_eq!(
-            event(d),
-            Some((Event::SyncSucceeded, Some(Cause::Commit), None))
-        );
-    }
-
-    #[test]
-    fn a_change_applied_at_the_synced_commit_is_reverted_drift_only() {
-        let mut r = record(RunMode::Apply, Trigger::Schedule, RunResult::Succeeded, "a");
-        r.applied.push(applied(true));
-        let d = detect(
-            &baseline(SyncStatus::Synced, Some("a")),
-            &r,
-            SyncStatus::Synced,
-        );
-        assert_eq!(
-            event(d),
-            Some((Event::DriftDetected, Some(Cause::Drift), Some(true)))
-        );
-    }
-
-    #[test]
-    fn drift_found_without_auto_sync_fires_once() {
-        let r = record(RunMode::Plan, Trigger::Schedule, RunResult::OutOfSync, "a");
-        let first = detect(
-            &baseline(SyncStatus::Synced, Some("a")),
-            &r,
-            SyncStatus::OutOfSync,
-        );
-        assert_eq!(
-            event(first),
-            Some((Event::DriftDetected, Some(Cause::Drift), Some(false)))
-        );
-        let again = detect(
-            &baseline(SyncStatus::OutOfSync, Some("a")),
-            &r,
-            SyncStatus::OutOfSync,
-        );
-        assert_eq!(again, None, "still drifted: not a new event");
-    }
-
-    #[test]
-    fn a_new_commit_waiting_is_out_of_sync_once() {
-        let r = record(RunMode::Plan, Trigger::Schedule, RunResult::OutOfSync, "b");
-        let first = detect(
-            &baseline(SyncStatus::Synced, Some("a")),
-            &r,
-            SyncStatus::OutOfSync,
-        );
-        assert_eq!(
-            event(first),
-            Some((Event::OutOfSync, Some(Cause::Commit), None))
-        );
-        let again = detect(
-            &baseline(SyncStatus::OutOfSync, Some("a")),
-            &r,
-            SyncStatus::OutOfSync,
-        );
-        assert_eq!(again, None);
-    }
-
-    #[test]
-    fn failures_fire_on_entering_the_failed_state() {
-        let r = record(RunMode::Apply, Trigger::Schedule, RunResult::Failed, "a");
-        let first = detect(
-            &baseline(SyncStatus::Synced, Some("a")),
-            &r,
-            SyncStatus::Failed,
-        );
-        assert_eq!(event(first), Some((Event::SyncFailed, None, None)));
-        let again = detect(
-            &baseline(SyncStatus::Failed, Some("a")),
-            &r,
-            SyncStatus::Failed,
-        );
-        assert_eq!(again, None);
-        let mut partial = record(RunMode::Apply, Trigger::Schedule, RunResult::Partial, "b");
-        partial.applied.push(applied(true));
-        partial.applied.push(applied(false));
-        let d = detect(
-            &baseline(SyncStatus::Synced, Some("a")),
-            &partial,
-            SyncStatus::Failed,
-        );
-        assert_eq!(
-            event(d),
-            Some((Event::SyncFailed, None, None)),
-            "partial is a failure, once"
-        );
-    }
-
-    #[test]
-    fn recovering_is_back_in_sync() {
-        let r = record(RunMode::Plan, Trigger::Schedule, RunResult::Succeeded, "a");
-        let d = detect(
-            &baseline(SyncStatus::Failed, Some("a")),
-            &r,
-            SyncStatus::Synced,
-        );
-        assert_eq!(event(d), Some((Event::BackInSync, None, None)));
-        let steady = detect(
-            &baseline(SyncStatus::Synced, Some("a")),
-            &r,
-            SyncStatus::Synced,
-        );
-        assert_eq!(steady, None);
-    }
-
-    #[test]
-    fn after_a_restart_only_failures_and_applied_changes_fire() {
-        let unknown = baseline(SyncStatus::Unknown, None);
-        let pending = record(RunMode::Plan, Trigger::Schedule, RunResult::OutOfSync, "a");
-        assert_eq!(detect(&unknown, &pending, SyncStatus::OutOfSync), None);
-        let synced = record(RunMode::Plan, Trigger::Schedule, RunResult::Succeeded, "a");
-        assert_eq!(detect(&unknown, &synced, SyncStatus::Synced), None);
-        let failed = record(RunMode::Plan, Trigger::Schedule, RunResult::Failed, "a");
-        assert!(detect(&unknown, &failed, SyncStatus::Failed).is_some());
-    }
-
-    #[test]
-    fn a_rollback_applied_is_sync_succeeded_with_cause_rollback() {
-        let mut r = record(
-            RunMode::Apply,
-            Trigger::Rollback,
-            RunResult::Succeeded,
-            "old",
-        );
-        r.applied.push(applied(true));
-        let d = detect(
-            &baseline(SyncStatus::Synced, Some("new")),
-            &r,
-            SyncStatus::Synced,
-        );
-        assert_eq!(
-            event(d),
-            Some((Event::SyncSucceeded, Some(Cause::Rollback), None))
-        );
-    }
-
-    #[test]
-    fn a_commit_to_another_folder_does_not_hide_drift() {
-        // In sync with folder tree t1; someone commits elsewhere in the
-        // repository (a new commit, the same tree here), then edits the
-        // system by hand.
-        let mut r = record(RunMode::Plan, Trigger::Schedule, RunResult::OutOfSync, "t1");
-        r.revision = Some("another-commit".into());
-        let d = detect(
-            &baseline(SyncStatus::Synced, Some("t1")),
-            &r,
-            SyncStatus::OutOfSync,
-        );
-        assert_eq!(
-            event(d),
-            Some((Event::DriftDetected, Some(Cause::Drift), Some(false)))
-        );
-    }
-
-    #[test]
-    fn drift_after_a_failure_is_reported() {
-        let r = record(RunMode::Plan, Trigger::Schedule, RunResult::OutOfSync, "t1");
-        let d = detect(
-            &baseline(SyncStatus::Failed, Some("t1")),
-            &r,
-            SyncStatus::OutOfSync,
-        );
-        assert_eq!(
-            event(d),
-            Some((Event::DriftDetected, Some(Cause::Drift), Some(false)))
-        );
-    }
-
-    #[test]
-    fn a_standing_rollback_keeps_scheduled_checks_quiet_but_not_failures() {
-        let mut rolled = baseline(SyncStatus::Synced, Some("t1"));
-        rolled.rolled_back = true;
-        let pending = record(RunMode::Plan, Trigger::Schedule, RunResult::OutOfSync, "t2");
-        assert_eq!(detect(&rolled, &pending, SyncStatus::OutOfSync), None);
-        let failed = record(RunMode::Plan, Trigger::Schedule, RunResult::Failed, "t2");
-        assert!(detect(&rolled, &failed, SyncStatus::Failed).is_some());
-    }
-
-    #[test]
-    fn without_a_tree_the_cause_is_unknown() {
-        let mut r = record(
-            RunMode::Apply,
-            Trigger::Schedule,
-            RunResult::Succeeded,
-            "t1",
-        );
-        r.tree = None;
-        r.applied.push(applied(true));
-        let d = detect(
-            &baseline(SyncStatus::Synced, Some("t1")),
-            &r,
-            SyncStatus::Synced,
-        );
-        assert_eq!(event(d), Some((Event::SyncSucceeded, None, None)));
-    }
 
     #[test]
     fn an_absent_value_is_null_outside_quotes_and_empty_inside() {
         let m = outcome_message();
-        let body = render(r#"{"r": {{reverted}}, "s": "{{reverted}}"}"#, &m);
+        let body = render(
+            r#"{"r": {{previous_revision}}, "s": "{{previous_revision}}"}"#,
+            &m,
+        );
         let parsed: Value = serde_json::from_str(&body).expect(&body);
         assert_eq!(parsed["r"], Value::Null);
         assert_eq!(parsed["s"], json!(""));
@@ -1331,68 +825,50 @@ mod tests {
 
     #[test]
     fn render_reads_placeholders_as_the_load_check_does() {
-        // The check sees one placeholder, `application`; so does render:
+        // The check sees one placeholder, `project`; so does render:
         // the unclosed `{{a ` is text.
-        let template = "x {{a {{application}} y {{}} z";
+        let template = "x {{a {{project}} y {{}} z";
         let names: Vec<&str> = crate::domain::webhook::placeholders(template).collect();
-        assert_eq!(names, ["application"]);
-        assert_eq!(
-            render(template, &outcome_message()),
-            "x {{a portainer y {{}} z"
-        );
+        assert_eq!(names, ["project"]);
+        assert_eq!(render(template, &outcome_message()), "x {{a prj y {{}} z");
     }
 
     fn outcome_message() -> Map<String, Value> {
-        let mut r = record(
-            RunMode::Apply,
-            Trigger::Schedule,
-            RunResult::Succeeded,
-            "0123456789abcdef",
-        );
-        r.revision = Some("0123456789abcdef".into());
-        r.operations.push(Operation {
-            kind: "user".into(),
-            key: "jane".into(),
-            op: OpKind::Update,
-            object: json!({"Username": "jane", "Password": "hunter2"}),
-            changes: vec![Change {
-                field: "Password".into(),
-                from: json!("old-secret"),
-                to: json!("hunter2"),
+        let range = CommitRange {
+            commits: vec![crate::ports::git::Commit {
+                revision: "0123456789abcdef".into(),
+                author: "Jane".into(),
+                message: "feat: add jane".into(),
+                at: 1_700_000_000,
             }],
-            file: None,
-        });
-        r.applied.push(applied(true));
-        let before = baseline(SyncStatus::Synced, Some("a"));
-        let detected = Detected::new(Event::SyncSucceeded, Some(Cause::Commit), None);
-        message(&RunOutcome {
-            application: "portainer",
+            more: false,
+            forced: false,
+            paths: Some(vec!["users/jane.json".into()]),
+            fetched: false,
+        };
+        let mut m = pull_message(&PullOutcome {
             project: "prj",
-            description: Some("Portainer"),
+            description: Some("Infra"),
             base_url: Some("https://gitops.example.com"),
-            before: &before,
-            status: SyncStatus::Synced,
-            record: &r,
-            detected: &detected,
-        })
+            revision: Some("0123456789abcdef"),
+            event: PullEvent::CommitPulled {
+                from: "fedcba9876543210",
+                range: Some(&range),
+            },
+        });
+        m.insert("at".into(), json!("2023-11-14T22:13:20Z"));
+        m.remove("previous_revision");
+        m
     }
 
     #[test]
-    fn a_message_names_changed_fields_but_never_their_values() {
+    fn a_commit_message_names_commits_and_files_never_contents() {
         let m = outcome_message();
-        let text = serde_json::to_string(&m).unwrap();
-        assert!(
-            !text.contains("hunter2") && !text.contains("old-secret"),
-            "{text}"
-        );
-        assert_eq!(m["changes"][0]["fields"], json!(["Password"]));
-        assert_eq!(m["cause"], json!("commit"));
-        assert_eq!(m["applied"], json!(1));
-        assert_eq!(m["at"], json!("2023-11-14T22:13:20Z"));
-        assert_eq!(
-            m["url"],
-            json!("https://gitops.example.com/applications/portainer")
-        );
+        assert_eq!(m["event"], json!("commit_pulled"));
+        assert_eq!(m["commits"][0]["author"], json!("Jane"));
+        assert_eq!(m["files"], json!(["users/jane.json"]));
+        assert_eq!(m["more_commits"], json!(false));
+        assert_eq!(m["url"], json!("https://gitops.example.com/projects/prj"));
     }
 
     #[test]
@@ -1400,12 +876,12 @@ mod tests {
         let mut m = outcome_message();
         m.insert("description".into(), json!("say \"hi\""));
         let body = render(
-            r#"{"d": "{{description}}", "c": {{changes}}, "r": "{{revision_short}}", "x": "{{reverted}}"}"#,
+            r#"{"d": "{{description}}", "c": {{commits}}, "r": "{{revision_short}}", "x": "{{previous_revision}}"}"#,
             &m,
         );
         let parsed: Value = serde_json::from_str(&body).expect(&body);
         assert_eq!(parsed["d"], json!("say \"hi\""));
-        assert_eq!(parsed["c"][0]["key"], json!("jane"));
+        assert_eq!(parsed["c"][0]["author"], json!("Jane"));
         assert_eq!(parsed["r"], json!("0123456"));
         assert_eq!(parsed["x"], json!(""));
     }
@@ -1427,16 +903,16 @@ mod tests {
         let creds = HashMap::from([("token".to_string(), "t0k".to_string())]);
         let m = outcome_message();
         let bearer = webhook(
-            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [c]\n",
+            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com/h\n  credentials: [c]\n",
         );
         let request = build_request(&bearer, &m, &creds).unwrap();
         assert_eq!(header(&request, "Authorization"), Some("Bearer t0k"));
         assert_eq!(header(&request, "Content-Type"), Some("application/json"));
         let parsed: Value = serde_json::from_slice(&request.body).unwrap();
-        assert_eq!(parsed["application"], json!("portainer"));
+        assert_eq!(parsed["project"], json!("prj"));
 
         let named = webhook(
-            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [c]\n  auth: {header: X-Gitlab-Token}\n  headers: {X-Gitlab-Event: unified-gitops}\n",
+            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com/h\n  credentials: [c]\n  auth: {header: X-Gitlab-Token}\n  headers: {X-Gitlab-Event: unified-gitops}\n",
         );
         let request = build_request(&named, &m, &creds).unwrap();
         assert_eq!(header(&request, "X-Gitlab-Token"), Some("t0k"));
@@ -1444,7 +920,7 @@ mod tests {
         assert_eq!(header(&request, "X-Gitlab-Event"), Some("unified-gitops"));
 
         let basic = webhook(
-            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [c]\n  auth: basic\n",
+            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com/h\n  credentials: [c]\n  auth: basic\n",
         );
         let err = build_request(&basic, &m, &creds).unwrap_err();
         assert!(err.contains("'username'"), "{err}");
@@ -1480,7 +956,7 @@ mod tests {
         let m = outcome_message();
         for auth in ["", "  auth: bearer\n", "  auth: {header: X-Key}\n"] {
             let w = webhook(&format!(
-                "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [cred-auth, cred-sign]\n{auth}"
+                "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com/h\n  credentials: [cred-auth, cred-sign]\n{auth}"
             ));
             let err = build_request(&w, &m, &creds).unwrap_err();
             assert!(
@@ -1489,17 +965,17 @@ mod tests {
             );
         }
         let signed = webhook(
-            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [cred-auth, cred-sign]\n  auth: none\n  sign: {secret_field: token}\n",
+            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com/h\n  credentials: [cred-auth, cred-sign]\n  auth: none\n  sign: {secret_field: token}\n",
         );
         let err = build_request(&signed, &m, &creds).unwrap_err();
         assert!(err.contains("all have a 'token' field"), "{err}");
         let signed = webhook(
-            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [cred-auth, cred-sign]\n  auth: none\n  sign: {}\n",
+            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com/h\n  credentials: [cred-auth, cred-sign]\n  auth: none\n  sign: {}\n",
         );
         assert!(build_request(&signed, &m, &creds).is_ok());
         // Missing everywhere is still missing.
         let basic = webhook(
-            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [cred-auth, cred-sign]\n  auth: basic\n",
+            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com/h\n  credentials: [cred-auth, cred-sign]\n  auth: basic\n",
         );
         let err = build_request(&basic, &m, &creds).unwrap_err();
         assert_eq!(err, "the credential has no 'username' field");
@@ -1509,7 +985,7 @@ mod tests {
     fn a_signed_webhook_carries_the_hmac_of_its_body() {
         let creds = HashMap::from([("secret".to_string(), "Jefe".to_string())]);
         let signed = webhook(
-            "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com/h\n  credentials: [c]\n  auth: none\n  body: 'what do ya want for nothing?'\n  sign: {}\n",
+            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com/h\n  credentials: [c]\n  auth: none\n  body: 'what do ya want for nothing?'\n  sign: {}\n",
         );
         let request = build_request(&signed, &outcome_message(), &creds).unwrap();
         // RFC 4231, test case 2.
@@ -1523,7 +999,7 @@ mod tests {
     fn a_job_template_webhook_uses_the_gitlab_receiver_and_its_key() {
         let creds = HashMap::from([("token".to_string(), "jt-key".to_string())]);
         let n = webhook(
-            "type: ascender\nevents: [drift_detected]\nascender:\n  url: https://ascender.example.com\n  job_template: 12\n  credentials: [k]\n",
+            "type: ascender\nevents: [commit_pulled]\nprojects: all\nascender:\n  url: https://ascender.example.com\n  job_template: 12\n  credentials: [k]\n",
         );
         let request = build_request(&n, &outcome_message(), &creds).unwrap();
         assert_eq!(
@@ -1533,11 +1009,11 @@ mod tests {
         assert_eq!(header(&request, "X-Gitlab-Token"), Some("jt-key"));
         assert_eq!(
             header(&request, "X-Gitlab-Event"),
-            Some("unified-gitops sync_succeeded")
+            Some("unified-gitops commit_pulled")
         );
         assert_eq!(header(&request, "Authorization"), None);
         let parsed: Value = serde_json::from_slice(&request.body).unwrap();
-        assert_eq!(parsed["event"], json!("sync_succeeded"));
+        assert_eq!(parsed["event"], json!("commit_pulled"));
     }
 
     #[test]
@@ -1577,28 +1053,6 @@ mod tests {
             status: 401,
             body: String::new()
         })));
-    }
-
-    #[test]
-    fn a_commit_touches_the_applications_whose_folder_it_changed() {
-        let app = |project: &str, path: &str| -> Application {
-            serde_saphyr::from_str(&format!("connector: c\nproject: {project}\npath: {path}\n"))
-                .unwrap()
-        };
-        let apps = HashMap::from([
-            ("demo".to_string(), app("p", "apps/demo")),
-            ("demo2".to_string(), app("p", "apps/demo2/")),
-            ("root".to_string(), app("p", ".")),
-            ("elsewhere".to_string(), app("q", "apps/demo")),
-        ]);
-        let touched = |paths: &[&str]| {
-            let paths: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
-            touched_applications(&apps, "p", &paths)
-        };
-        // A path under apps/demo2 is not under apps/demo; the root takes all.
-        assert_eq!(touched(&["apps/demo2/x.yaml"]), ["demo2", "root"]);
-        assert_eq!(touched(&["apps/demo/x.yaml"]), ["demo", "root"]);
-        assert_eq!(touched(&["README.md"]), ["root"]);
     }
 
     #[test]

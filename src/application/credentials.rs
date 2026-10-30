@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use crate::domain::app::Application;
 use crate::domain::credential::{Credential, delivery_id, variable_part};
 use crate::domain::ldap::LdapConfig;
 use crate::domain::project::GitProject;
@@ -118,13 +117,12 @@ fn merge(
     Ok(all_credentials)
 }
 
-// What names a credential in its configuration: the applications that pass it
-// to their connector, the projects that clone with it, the webhooks that send
+// What names a credential in its configuration: the projects that clone with
+// it, the webhooks that send
 // with it, the directory login's service account, and, for a Vault, the
 // credentials reading from it. Sorted, so a page and a diff of it are stable.
 pub struct CredentialUsers {
     pub credentials: Vec<String>,
-    pub applications: Vec<String>,
     pub projects: Vec<String>,
     pub webhooks: Vec<String>,
     pub ldap: bool,
@@ -133,17 +131,10 @@ pub struct CredentialUsers {
 pub fn users_of(
     credential_id: &str,
     credentials: &HashMap<String, Credential>,
-    applications: &HashMap<String, Application>,
     projects: &HashMap<String, GitProject>,
     webhooks: &HashMap<String, Webhook>,
     ldap: Option<&LdapConfig>,
 ) -> CredentialUsers {
-    let mut app_ids: Vec<String> = applications
-        .iter()
-        .filter(|(_, app)| app.credentials.iter().any(|c| c == credential_id))
-        .map(|(id, _)| id.clone())
-        .collect();
-    app_ids.sort();
     let mut project_ids: Vec<String> = projects
         .iter()
         .filter(|(_, project)| project.credential_id() == Some(credential_id))
@@ -167,7 +158,6 @@ pub fn users_of(
     credential_ids.sort();
     CredentialUsers {
         credentials: credential_ids,
-        applications: app_ids,
         projects: project_ids,
         webhooks: webhook_ids,
         ldap: ldap.is_some_and(|l| l.bind_credential == credential_id),
@@ -352,25 +342,24 @@ mod tests {
             (
                 "ntf-b".to_string(),
                 webhook(
-                    "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n  credentials: [cred-hook]\n",
+                    "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n  credentials: [cred-hook]\n",
                 ),
             ),
             (
                 "ntf-a".to_string(),
                 webhook(
-                    "type: ascender\nevents: [sync_failed]\nascender:\n  url: https://a.example.com\n  job_template: 1\n  credentials: [cred-hook]\n",
+                    "type: ascender\nevents: [pull_failed]\nprojects: all\nascender:\n  url: https://a.example.com\n  job_template: 1\n  credentials: [cred-hook]\n",
                 ),
             ),
             (
                 "ntf-c".to_string(),
                 webhook(
-                    "type: webhook\nevents: [sync_failed]\nwebhook:\n  url: https://x.example.com\n",
+                    "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n",
                 ),
             ),
         ]);
         let users = users_of(
             "cred-hook",
-            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &webhooks,
@@ -406,14 +395,12 @@ mod tests {
             &credentials,
             &HashMap::new(),
             &HashMap::new(),
-            &HashMap::new(),
             None,
         );
         assert_eq!(users.credentials, ["cred-a", "cred-b"]);
         let users = users_of(
             "cred-a",
             &credentials,
-            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             None,

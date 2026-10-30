@@ -1,13 +1,8 @@
 // Outbound (driven) adapters: the app drives the outside world through these.
 // Each implements a driven port from `ports/`.
 pub mod config;
-pub mod connectors;
 pub mod directory;
 pub mod git;
-pub mod webhooks;
-// Not a port implementation: the scrubbed-environment Command builder shared
-// by every adapter that spawns a local script.
-pub(crate) mod process_env;
 pub mod python;
 pub mod secrets;
-pub mod state;
+pub mod webhooks;

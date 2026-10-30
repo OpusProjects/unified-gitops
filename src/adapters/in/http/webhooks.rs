@@ -12,8 +12,8 @@ use crate::application::webhooks::{self, Delivery, Job};
 use crate::domain::webhook::{Event, WebhookType};
 
 // Webhooks: which events go where, and how the last send went.
-// Admin-only, like connectors: a webhook can name any application or
-// project, and its destination says where this instance reaches out to.
+// Admin-only, like credentials: a webhook can name any project, and its
+// destination says where this instance reaches out to.
 
 #[derive(Serialize, ToSchema)]
 pub struct WebhookSummary {
@@ -23,18 +23,11 @@ pub struct WebhookSummary {
     #[serde(rename = "type")]
     pub webhook_type: WebhookType,
     pub events: Vec<Event>,
-    /// Every application, present and future (`applications: all`)
-    pub all_applications: bool,
-    /// The applications it listens to, when it names them; empty with
-    /// all_applications false = none
-    pub applications: Vec<String>,
     /// Every project, present and future (`projects: all`)
     pub all_projects: bool,
-    /// The projects it listens to, when it names them: their own events, and
-    /// those of every application reading from them
+    /// The projects it listens to, when it names them; empty with
+    /// all_projects false = none
     pub projects: Vec<String>,
-    /// The applications its projects reach right now, sorted
-    pub project_applications: Vec<String>,
     /// Where it sends: scheme and host only, never a path or query, which
     /// can carry a receiver's secret
     pub destination: String,
@@ -70,7 +63,7 @@ pub struct RequestInfo {
     path = "/api/v1/webhooks",
     tag = "Webhooks",
     responses(
-        (status = 200, description = "Every webhook: its events, applications, projects and destination, and its last send", body = Vec<WebhookSummary>),
+        (status = 200, description = "Every webhook: its events, projects and destination, and its last send", body = Vec<WebhookSummary>),
         (status = 403, description = "API key is not admin", body = ErrorBody)
     )
 )]
@@ -94,28 +87,15 @@ pub async fn list_webhooks(
 // One webhook as the list shows it.
 fn info(state: &AppState, id: &str, n: &crate::domain::webhook::Webhook) -> WebhookSummary {
     let target = n.ascender.as_ref().or(n.awx.as_ref());
-    let mut applications = n.applications.named().to_vec();
-    applications.sort();
     let mut projects = n.projects.named().to_vec();
     projects.sort();
-    let mut project_applications: Vec<String> = state
-        .config()
-        .applications
-        .iter()
-        .filter(|(_, app)| n.projects.includes(&app.project))
-        .map(|(id, _)| id.clone())
-        .collect();
-    project_applications.sort();
     WebhookSummary {
         name: id.to_string(),
         description: n.description.clone(),
         webhook_type: n.webhook_type,
         events: n.events.clone(),
-        all_applications: n.applications.is_all(),
-        applications,
         all_projects: n.projects.is_all(),
         projects,
-        project_applications,
         destination: n.destination(),
         job_template: target.and_then(|t| t.job_template),
         workflow_job_template: target.and_then(|t| t.workflow_job_template),

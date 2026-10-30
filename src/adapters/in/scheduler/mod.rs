@@ -6,9 +6,7 @@ use tracing::{debug, error, info};
 
 use crate::AppState;
 use crate::application::projects::{Announce, sync_project};
-use crate::application::reconcile::pull_and_reconcile;
 use crate::domain::project::GitProject;
-use crate::domain::run::{RunMode, RunResult, Trigger};
 use crate::domain::sync_health::SyncHealthRegistry;
 use crate::ports::git::GitPort;
 use crate::ports::secrets::SecretsPort;
@@ -150,55 +148,6 @@ where
     })
 }
 
-// One scheduled check of an application, with the backoff bookkeeping. The
-// project is pulled first (inside pull_and_reconcile), so a commit is picked up
-// at the next check, not at the project's own pull interval.
-async fn scheduled_reconcile(
-    state: &AppState,
-    app_id: &str,
-    consecutive_failures: &mut u32,
-    skip: &mut u32,
-) {
-    let config = state.config();
-    let Some(app) = config.applications.get(app_id) else {
-        return;
-    };
-
-    // auto_sync applies what a check finds; otherwise the check only reports.
-    // Whether a rollback pauses it is the run's to decide, under the
-    // application's lock (reconcile::effective_mode): read here, before the
-    // pull and the wait for that lock, it could be stale by the time the run
-    // starts.
-    let mode = if app.auto_sync {
-        RunMode::Apply
-    } else {
-        RunMode::Plan
-    };
-    let failed = match pull_and_reconcile(
-        &state.reconciler(),
-        &config.catalog(),
-        app_id,
-        mode,
-        Trigger::Schedule,
-        None,
-    )
-    .await
-    {
-        Ok(record) => matches!(record.result, RunResult::Failed | RunResult::Partial),
-        Err(e) => {
-            error!(application = %app_id, error = %e, "Reconcile could not start");
-            true
-        }
-    };
-
-    if failed {
-        *consecutive_failures = consecutive_failures.saturating_add(1);
-        *skip = ticks_to_skip(*consecutive_failures);
-    } else {
-        *consecutive_failures = 0;
-    }
-}
-
 // One scheduled project pull with the backoff bookkeeping, shared by the
 // interval and cron loops so the two cannot drift.
 #[allow(clippy::too_many_arguments)]
@@ -216,7 +165,6 @@ async fn scheduled_project_pull(
     skip: &mut u32,
 ) {
     let config = state.config();
-    let catalog = config.catalog();
     match sync_project(
         git,
         secrets,
@@ -227,7 +175,8 @@ async fn scheduled_project_pull(
         projects_dir,
         Some(Announce {
             dispatcher: &state.dispatcher,
-            catalog: &catalog,
+            webhooks: &config.webhooks,
+            url: config.url.as_deref(),
         }),
         crate::application::projects::RunOrigin::of(
             crate::domain::sync_health::RunTrigger::Scheduled,
@@ -267,11 +216,10 @@ async fn scheduled_project_pull(
 // snapshot, and the difference is invisible to everything else.
 //
 // The outgoing generation is NOT waited for here. Its tasks stop at their
-// next wait point, which for a task in the middle of a run means after that
-// run finishes — an apply is never cut between operations. It is safe to
-// overlap because each application holds its own lock for the whole run
-// (application::reconcile::Locks): the outgoing task's last run and the
-// incoming task's first cannot interleave.
+// next wait point, which for a task in the middle of a pull means after that
+// pull finishes. It is safe to overlap because each checkout has its own
+// lock (application::projects::checkout_lock): the outgoing task's last pull
+// and the incoming task's first cannot interleave.
 //
 // Shutdown still drains everything, outgoing generations included, because
 // main's final cache snapshot may not run while any task can still write.
@@ -294,12 +242,10 @@ pub fn start_supervisor(
             let generation = state.reload.generation();
             let (stop, stop_rx) = watch::channel(false);
 
-            let mut handles = start_application_tasks(Arc::clone(&state), stop_rx.clone());
-            handles.extend(start_project_tasks(Arc::clone(&state), stop_rx.clone()));
+            let mut handles = start_project_tasks(Arc::clone(&state), stop_rx.clone());
             // A project that arrived WITH this reload has no checkout yet, and
-            // the scripts of any source pointing into it would be missing
-            // until its first periodic pull — which for a project without an
-            // interval is never. Boot already clones (main), so this is only
+            // would have none until its first periodic pull — which for a
+            // project without an interval is never. Boot already clones (main), so this is only
             // for what a reload added.
             if generation > 0 {
                 handles.extend(clone_missing_checkouts(Arc::clone(&state)));
@@ -357,7 +303,6 @@ fn clone_missing_checkouts(state: Arc<AppState>) -> Vec<tokio::task::JoinHandle<
             }
             info!(project = %project_id, "New project — cloning its checkout");
             let config = state.config();
-            let catalog = config.catalog();
             match sync_project(
                 &*state.git,
                 &*state.secrets,
@@ -368,7 +313,8 @@ fn clone_missing_checkouts(state: Arc<AppState>) -> Vec<tokio::task::JoinHandle<
                 &state.projects_dir,
                 Some(Announce {
                     dispatcher: &state.dispatcher,
-                    catalog: &catalog,
+                    webhooks: &config.webhooks,
+                    url: config.url.as_deref(),
                 }),
                 crate::application::projects::RunOrigin::of(
                     crate::domain::sync_health::RunTrigger::Startup,
@@ -382,61 +328,6 @@ fn clone_missing_checkouts(state: Arc<AppState>) -> Vec<tokio::task::JoinHandle<
         }));
     }
 
-    handles
-}
-
-// One task per application: check every sync_interval_seconds, jittered so
-// applications sharing an interval do not hit their systems in lockstep,
-// backing off 1, 2, 4, 8 intervals while it keeps failing.
-pub fn start_application_tasks(
-    state: Arc<AppState>,
-    shutdown: watch::Receiver<bool>,
-) -> Vec<tokio::task::JoinHandle<()>> {
-    let mut handles = Vec::new();
-    let config = state.config();
-
-    for (app_id, app) in &config.applications {
-        let interval_secs = app.sync_interval_seconds.max(1);
-        info!(application = %app_id, interval_secs, auto_sync = app.auto_sync, "Application scheduled");
-
-        let task_state = Arc::clone(&state);
-        let task_app_id = app_id.clone();
-        let task_shutdown = shutdown.clone();
-
-        handles.push(spawn_supervised(
-            format!("application:{app_id}"),
-            Duration::from_secs(interval_secs),
-            move || {
-                let state = Arc::clone(&task_state);
-                let app_id = task_app_id.clone();
-                let mut shutdown = task_shutdown.clone();
-                async move {
-                    if *shutdown.borrow() {
-                        return;
-                    }
-                    tokio::select! {
-                        _ = tokio::time::sleep(startup_jitter(&app_id, interval_secs)) => {}
-                        _ = shutdown.changed() => return,
-                    }
-                    let mut consecutive_failures: u32 = 0;
-                    let mut skip: u32 = 0;
-                    let mut ticker = ticker(interval_secs);
-                    loop {
-                        tokio::select! {
-                            _ = ticker.tick() => {}
-                            _ = shutdown.changed() => return,
-                        }
-                        if skip > 0 {
-                            skip -= 1;
-                            debug!(application = %app_id, ticks_left = skip, "Backing off, tick skipped");
-                            continue;
-                        }
-                        scheduled_reconcile(&state, &app_id, &mut consecutive_failures, &mut skip).await;
-                    }
-                }
-            },
-        ));
-    }
     handles
 }
 

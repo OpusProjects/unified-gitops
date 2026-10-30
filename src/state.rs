@@ -2,11 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use crate::domain::app::Application;
-use crate::domain::connector::Connector;
 use crate::domain::credential::Credential;
 use crate::domain::project::GitProject;
-use crate::domain::run::AppStateRegistry;
 use crate::domain::sync_health::SyncHealthRegistry;
 use crate::domain::webhook::Webhook;
 use crate::ports;
@@ -17,18 +14,16 @@ use crate::ports;
 // It used to be five plain fields on AppState, which made it structurally
 // impossible to change any of it without a new process. Grouping it behind
 // one Arc is what makes a reload a single pointer swap: a request that is
-// already running keeps the snapshot it started with (so a sync cannot see
+// already running keeps the snapshot it started with (so a pull cannot see
 // half of an old configuration and half of a new one), and the next request
 // picks up the new one.
 pub struct RuntimeConfig {
-    pub applications: HashMap<String, Application>,
-    pub connectors: HashMap<String, Connector>,
     pub projects: HashMap<String, GitProject>,
     // Carried but never resolved from here — the secrets chain holds its own
     // copy. It lives in the snapshot so a reload can say WHICH credential
     // changed.
     pub credentials: HashMap<String, Credential>,
-    // Read after every run, so they reload like applications.
+    // Read after every pull, so they reload like projects.
     pub webhooks: HashMap<String, Webhook>,
     // Carried for the same reason as `credentials`: the chain is rebuilt from
     // it on every reload.
@@ -48,19 +43,6 @@ pub struct RuntimeConfig {
     pub ldap: Option<crate::domain::ldap::LdapConfig>,
     // `server.ui.home`: where a sign-in with no page to return to lands.
     pub ui_home: String,
-}
-
-impl RuntimeConfig {
-    // The borrowed view a reconcile run reads, from this one snapshot.
-    pub fn catalog(&self) -> crate::application::reconcile::Catalog<'_> {
-        crate::application::reconcile::Catalog {
-            applications: &self.applications,
-            connectors: &self.connectors,
-            projects: &self.projects,
-            webhooks: &self.webhooks,
-            url: self.url.as_deref(),
-        }
-    }
 }
 
 // Bumped on every reload, and watched by the scheduler: the tasks of the
@@ -111,10 +93,6 @@ impl Default for ReloadNotifier {
 // Arc = Atomic Reference Counted — a reference-counted pointer shared across
 // threads; each axum handler receives a cheap clone of the same AppState.
 pub struct AppState {
-    // Runs connector scripts (list / apply / describe).
-    pub connector: Arc<dyn ports::connector::ConnectorPort>,
-    // The local copy of each system's current settings.
-    pub store: Arc<dyn ports::state_store::StateStorePort>,
     pub secrets: Arc<dyn ports::secrets::SecretsPort>,
     pub git: Arc<dyn ports::git::GitPort>,
     pub venv: Arc<dyn ports::venv::VenvPort>,
@@ -125,7 +103,7 @@ pub struct AppState {
     // The reloadable configuration. Private: reads go through config(), which
     // hands out an Arc snapshot rather than a lock guard — a handler holding a
     // guard across an await would block every reload behind its slowest
-    // connector run.
+    // pull.
     // pub(crate) only so AppBuilder can fill it — everything else reads it
     // through config() and writes it through swap_config().
     pub(crate) config: RwLock<Arc<RuntimeConfig>>,
@@ -159,17 +137,9 @@ pub struct AppState {
     // the same reason: it decides which middlewares and routes are in the
     // router, and the router is built once (config::RestartOnlySettings).
     pub ui: crate::config::UiConfig,
-    // Each application's status, last plan and run history. In-process,
-    // like the health registries: no outside world behind it.
-    pub runs: Arc<AppStateRegistry>,
-    // Last attempt / success / error / streak per application run (keyed by
-    // application id) and per project pull (keyed by project id).
-    pub app_health: Arc<SyncHealthRegistry>,
+    // Last attempt / success / error / streak per project pull (keyed by
+    // project id).
     pub project_health: Arc<SyncHealthRegistry>,
-    // One lock per application (application::reconcile).
-    pub locks: Arc<crate::application::reconcile::Locks>,
-    // What each connector last described in `describe` (application::reconcile).
-    pub described: Arc<crate::domain::connector::DescribedKinds>,
     // When this process's app was built: how long it has been running, for
     // the Configuration page ("did it restart?").
     pub started: std::time::Instant,
@@ -183,14 +153,6 @@ pub struct AppState {
 }
 
 impl AppState {
-    // What the API, the overview and /metrics report for an application:
-    // the last run's status, with a rollback standing over it.
-    pub fn application_status(&self, app_id: &str) -> crate::domain::run::SyncStatus {
-        self.runs
-            .status(app_id)
-            .with_rollback(self.store.rollback(app_id).is_some())
-    }
-
     // The configuration as of right now. An Arc clone, not a borrow: the
     // caller may hold it across await points, and while it does, a concurrent
     // reload swaps the pointer without disturbing it.
@@ -238,23 +200,5 @@ impl AppState {
     pub fn start_webhooks(&self) {
         self.dispatcher
             .start(Arc::clone(&self.secrets), Arc::clone(&self.http));
-    }
-
-    // The ports a reconcile run uses, borrowed from the state that owns them.
-    pub fn reconciler(&self) -> crate::application::reconcile::Reconciler<'_> {
-        crate::application::reconcile::Reconciler {
-            connector: &*self.connector,
-            git: &*self.git,
-            secrets: &*self.secrets,
-            store: &*self.store,
-            states: &self.runs,
-            health: &self.app_health,
-            locks: &self.locks,
-            projects_dir: &self.projects_dir,
-            venv: &*self.venv,
-            project_health: &self.project_health,
-            described: &self.described,
-            dispatcher: &self.dispatcher,
-        }
     }
 }

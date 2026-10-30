@@ -31,7 +31,7 @@ pub type AuthContext = auth_rs::http::AuthContext<Permissions>;
 #[derive(Clone, Debug)]
 pub enum Permissions {
     Admin,
-    Scoped { applications: HashSet<String> },
+    Scoped { projects: HashSet<String> },
 }
 
 // What an instance with no API keys grants every caller.
@@ -48,10 +48,10 @@ impl Permissions {
         matches!(self, Permissions::Admin)
     }
 
-    pub fn allows_application(&self, id: &str) -> bool {
+    pub fn allows_project(&self, id: &str) -> bool {
         match self {
             Permissions::Admin => true,
-            Permissions::Scoped { applications } => applications.contains(id),
+            Permissions::Scoped { projects } => projects.contains(id),
         }
     }
 }
@@ -97,7 +97,7 @@ pub fn resolve_api_keys(cfg: &crate::config::AppConfig) -> Result<Vec<ResolvedAp
         let permissions = match def.role {
             ApiKeyRole::Admin => Permissions::Admin,
             ApiKeyRole::Restricted => Permissions::Scoped {
-                applications: def.applications.iter().cloned().collect(),
+                projects: def.projects.iter().cloned().collect(),
             },
         };
 
@@ -373,14 +373,14 @@ mod tests {
     #[test]
     fn scoped_permissions_only_allow_listed_ids() {
         let perms = Permissions::Scoped {
-            applications: ["app-a".to_string()].into_iter().collect(),
+            projects: ["prj-a".to_string()].into_iter().collect(),
         };
-        assert!(perms.allows_application("app-a"));
-        assert!(!perms.allows_application("app-b"));
+        assert!(perms.allows_project("prj-a"));
+        assert!(!perms.allows_project("prj-b"));
     }
 
     #[test]
     fn admin_permissions_allow_everything() {
-        assert!(Permissions::Admin.allows_application("anything"));
+        assert!(Permissions::Admin.allows_project("anything"));
     }
 }
