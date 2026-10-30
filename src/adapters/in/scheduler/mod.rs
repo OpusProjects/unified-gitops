@@ -207,13 +207,11 @@ pub fn start_item_schedules(
     use crate::domain::run::Kind;
     use crate::domain::trigger::On;
     let config = state.config();
-    let mut scheduled: Vec<(Kind, String, String)> = config
-        .apis
-        .iter()
-        .filter(|(_, a)| a.enabled && a.trigger.fires_on(On::Schedule))
-        .filter_map(|(id, a)| Some((Kind::Api, id.clone(), a.trigger.schedule.clone()?)))
+    let scheduled: Vec<(Kind, String, String)> = crate::application::actions::items(&config)
+        .into_iter()
+        .filter(|i| i.enabled && i.trigger.fires_on(On::Schedule))
+        .filter_map(|i| Some((i.kind, i.id.to_string(), i.trigger.schedule.clone()?)))
         .collect();
-    scheduled.sort();
     let mut handles = Vec::new();
     for (kind, item, expression) in scheduled {
         let Ok(cron) = parse_cron(&expression) else {

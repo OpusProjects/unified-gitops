@@ -12,12 +12,14 @@ use crate::application::webhooks::{Dispatcher, Job};
 use crate::domain::api::{self, Api, Per};
 use crate::domain::http::HttpSpec;
 use crate::domain::run::{Kind, Run, RunLog, Standing, Step};
+use crate::domain::script::{Script, Stdin};
 use crate::domain::template::Scope;
 use crate::domain::trigger::On;
 use crate::domain::unix_now as now;
 use crate::domain::webhook::{Event, Webhook};
 use crate::ports::git::GitPort;
 use crate::ports::http_sender::HttpSenderPort;
+use crate::ports::process::{Execution, ProcessPort};
 use crate::ports::secrets::SecretsPort;
 
 // The use case "act on a change": when a pull brings commits, the items
@@ -32,6 +34,7 @@ pub struct Ports {
     pub http: Arc<dyn HttpSenderPort>,
     pub git: Arc<dyn GitPort>,
     pub dispatcher: Arc<Dispatcher>,
+    pub process: Arc<dyn ProcessPort>,
     pub projects_dir: PathBuf,
 }
 
@@ -102,7 +105,13 @@ impl Runner {
                     .ok_or_else(|| format!("API '{}' is not configured", request.item))?;
                 run_api(&ports, api, &request).await
             }
-            Kind::Script => return Err("scripts are not available yet".to_string()),
+            Kind::Script => {
+                let script = config
+                    .scripts
+                    .get(&request.item)
+                    .ok_or_else(|| format!("Script '{}' is not configured", request.item))?;
+                run_script(&ports, script, &request).await
+            }
         };
         let standing = self.log.record(run.clone());
         tell(&ports.dispatcher, config, &run, standing);
@@ -130,27 +139,21 @@ impl Runner {
         previous_revision: &str,
         files: Option<&[String]>,
     ) {
-        let mut wanted: Vec<(&String, &Api)> = config
-            .apis
-            .iter()
-            .filter(|(_, a)| a.enabled && a.project == project && a.trigger.fires_on(On::Change))
-            .filter(|(_, a)| files.is_none_or(|f| !a.trigger.filter().select(f).is_empty()))
-            .collect();
-        wanted.sort_by(|a, b| a.0.cmp(b.0));
-        for (id, api) in wanted {
-            let selected: Option<Vec<String>> = files.map(|f| {
-                api.trigger
-                    .filter()
-                    .select(f)
-                    .into_iter()
-                    .cloned()
-                    .collect()
-            });
+        for item in items(config) {
+            if !(item.enabled && item.project == project && item.trigger.fires_on(On::Change)) {
+                continue;
+            }
+            let filter = item.trigger.filter();
+            let selected: Option<Vec<String>> =
+                files.map(|f| filter.select(f).into_iter().cloned().collect());
+            if selected.as_ref().is_some_and(Vec::is_empty) {
+                continue;
+            }
             self.change(
                 config,
-                Kind::Api,
-                id,
-                api.trigger.debounce_seconds,
+                item.kind,
+                item.id,
+                item.trigger.debounce_seconds,
                 selected,
                 previous_revision,
             );
@@ -213,12 +216,48 @@ impl Runner {
 
     // At startup, after the first pulls: every item that runs then.
     pub fn at_startup(self: &Arc<Self>, config: &Arc<RuntimeConfig>) {
-        for (id, api) in &config.apis {
-            if api.enabled && api.trigger.fires_on(On::Startup) {
-                self.spawn(Arc::clone(config), scheduled(Kind::Api, id, On::Startup));
+        for item in items(config) {
+            if item.enabled && item.trigger.fires_on(On::Startup) {
+                self.spawn(
+                    Arc::clone(config),
+                    scheduled(item.kind, item.id, On::Startup),
+                );
             }
         }
     }
+}
+
+// Every item that acts, whichever its kind, by what the runner reads of it;
+// sorted, so runs start in a stable order.
+pub struct Item<'a> {
+    pub kind: Kind,
+    pub id: &'a str,
+    pub project: &'a str,
+    pub enabled: bool,
+    pub trigger: &'a crate::domain::trigger::Trigger,
+}
+
+pub fn items(config: &RuntimeConfig) -> Vec<Item<'_>> {
+    let mut all: Vec<Item<'_>> = config
+        .apis
+        .iter()
+        .map(|(id, a)| Item {
+            kind: Kind::Api,
+            id,
+            project: &a.project,
+            enabled: a.enabled,
+            trigger: &a.trigger,
+        })
+        .chain(config.scripts.iter().map(|(id, s)| Item {
+            kind: Kind::Script,
+            id,
+            project: &s.project,
+            enabled: s.enabled,
+            trigger: &s.trigger,
+        }))
+        .collect();
+    all.sort_by(|a, b| (a.kind, a.id).cmp(&(b.kind, b.id)));
+    all
 }
 
 // A run of every file the trigger selects: at startup, on a schedule, by
@@ -307,6 +346,7 @@ async fn run_api(ports: &Ports, api: &Api, request: &Request) -> Run {
         trigger: request.trigger,
         by: request.by.clone(),
         revision: revision.clone(),
+        script_revision: None,
         dry_run: request.dry_run,
         started_at: now(),
         duration_ms: 0,
@@ -726,7 +766,11 @@ fn tell(dispatcher: &Dispatcher, config: &RuntimeConfig, run: &Run, standing: St
     }
     let (succeeded, failed, recovered) = match run.kind {
         Kind::Api => (Event::ApiSucceeded, Event::ApiFailed, Event::ApiRecovered),
-        Kind::Script => (Event::ApiSucceeded, Event::ApiFailed, Event::ApiRecovered),
+        Kind::Script => (
+            Event::ScriptSucceeded,
+            Event::ScriptFailed,
+            Event::ScriptRecovered,
+        ),
     };
     let mut events = vec![if run.ok { succeeded } else { failed }];
     if standing == Standing::Recovered {
@@ -737,7 +781,10 @@ fn tell(dispatcher: &Dispatcher, config: &RuntimeConfig, run: &Run, standing: St
             .apis
             .get(&run.item)
             .and_then(|a| a.description.as_deref()),
-        Kind::Script => None,
+        Kind::Script => config
+            .scripts
+            .get(&run.item)
+            .and_then(|s| s.description.as_deref()),
     };
     let mut wanted: Vec<(&String, &Webhook, Event)> = Vec::new();
     for event in events {
@@ -760,14 +807,257 @@ fn tell(dispatcher: &Dispatcher, config: &RuntimeConfig, run: &Run, standing: St
 }
 
 // The items each project's change would start, for the API: which APIs
-// watch it.
+// and scripts watch it.
 pub fn watching(config: &RuntimeConfig, project: &str) -> HashMap<Kind, Vec<String>> {
-    let mut apis: Vec<String> = config
-        .apis
-        .iter()
-        .filter(|(_, a)| a.project == project)
-        .map(|(id, _)| id.clone())
+    let mut out: HashMap<Kind, Vec<String>> =
+        HashMap::from([(Kind::Api, vec![]), (Kind::Script, vec![])]);
+    for item in items(config) {
+        if item.project == project {
+            out.entry(item.kind).or_default().push(item.id.to_string());
+        }
+    }
+    out
+}
+
+// A credential's fields as a script reads them: CREDENTIAL_<FIELD>, the
+// name upper case and anything but letters and digits as '_'.
+pub fn credential_variable(field: &str) -> String {
+    let name: String = field
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
         .collect();
-    apis.sort();
-    HashMap::from([(Kind::Api, apis)])
+    format!("CREDENTIAL_{name}")
+}
+
+// added, changed or removed, as the checkout has the file now.
+fn status_of(checkout: &Path, file: &str, previous: Option<&String>) -> &'static str {
+    match (checkout.join(file).exists(), previous) {
+        (false, _) => "removed",
+        (true, Some(_)) => "changed",
+        (true, None) => "present",
+    }
+}
+
+async fn run_script(ports: &Ports, script: &Script, request: &Request) -> Run {
+    let started = Instant::now();
+    let command = &script.script;
+    let watched = ports.projects_dir.join(&script.project);
+    let home_project = command.project_of(&script.project);
+    let home = ports.projects_dir.join(home_project);
+    let mut run = Run {
+        item: request.item.clone(),
+        kind: Kind::Script,
+        project: script.project.clone(),
+        trigger: request.trigger,
+        by: request.by.clone(),
+        revision: ports.git.revision(&watched).await,
+        script_revision: ports.git.revision(&home).await,
+        dry_run: request.dry_run,
+        started_at: now(),
+        duration_ms: 0,
+        ok: false,
+        error: None,
+        steps: Vec::new(),
+    };
+    let finish = |mut run: Run| {
+        run.ok = run.error.is_none() && run.steps.iter().all(|s| s.ok);
+        run.duration_ms = started.elapsed().as_millis() as u64;
+        count(&run);
+        run
+    };
+    let file = home.join(&command.file);
+    if !file.is_file() {
+        run.error = Some(format!(
+            "script.file '{}' is not in project '{home_project}' (has it been pulled?)",
+            command.file
+        ));
+        return finish(run);
+    }
+    let mut secrets: Vec<(String, String)> = Vec::new();
+    if let Some(id) = &script.credential {
+        match ports.secrets.resolve(id).await {
+            Ok(fields) => {
+                secrets = fields
+                    .into_iter()
+                    .map(|(field, value)| (credential_variable(&field), value))
+                    .collect();
+                secrets.sort();
+            }
+            Err(e) => {
+                run.error = Some(format!("credential '{id}': {}", e.message));
+                return finish(run);
+            }
+        }
+    }
+    let filter = script.trigger.filter();
+    let files: Vec<String> = match &request.files {
+        Some(files) => files.clone(),
+        None => {
+            let root = watched.clone();
+            tokio::task::spawn_blocking(move || files_in(&root, &filter))
+                .await
+                .unwrap_or_default()
+        }
+    };
+    let event = event_value(&script.project, request, run.revision.as_deref(), &files);
+    let fixed = vec![
+        ("GITOPS_ITEM".to_string(), request.item.clone()),
+        ("GITOPS_PROJECT".to_string(), script.project.clone()),
+        (
+            "GITOPS_TRIGGER".to_string(),
+            request.trigger.as_str().to_string(),
+        ),
+        (
+            "GITOPS_CHECKOUT".to_string(),
+            watched.to_string_lossy().into_owned(),
+        ),
+        (
+            "GITOPS_COMMIT".to_string(),
+            run.revision.clone().unwrap_or_default(),
+        ),
+        (
+            "GITOPS_PREVIOUS_COMMIT".to_string(),
+            request.previous_revision.clone().unwrap_or_default(),
+        ),
+        (
+            "GITOPS_SCRIPT_COMMIT".to_string(),
+            run.script_revision.clone().unwrap_or_default(),
+        ),
+        ("GITOPS_CHANGED_FILES".to_string(), files.join("\n")),
+    ];
+    let venv_bin = {
+        let bin = ports
+            .projects_dir
+            .join(crate::ports::venv::VENVS_DIR)
+            .join(home_project)
+            .join("bin");
+        bin.is_dir().then(|| bin.to_string_lossy().into_owned())
+    };
+    let working_dir = match &command.working_dir {
+        Some(dir) => watched.join(dir),
+        None => watched.clone(),
+    };
+    let units: Vec<Option<&str>> = match command.per {
+        Per::Commit => vec![None],
+        Per::File => files.iter().map(|f| Some(f.as_str())).collect(),
+    };
+    for unit in units {
+        let mut scope = Scope::new().with("event", event.clone());
+        let mut vars = fixed.clone();
+        if let Some(file) = unit {
+            let status = status_of(&watched, file, request.previous_revision.as_ref());
+            scope.set("file", api::file_value(file, status));
+            vars.push(("GITOPS_FILE".to_string(), file.to_string()));
+            vars.push(("GITOPS_FILE_STATUS".to_string(), status.to_string()));
+        }
+        vars.extend(
+            command
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), scope.render_text(v))),
+        );
+        vars.extend(secrets.iter().cloned());
+        let rendered: Vec<String> = command.args.iter().map(|a| scope.render_text(a)).collect();
+        let file_path = file.to_string_lossy().into_owned();
+        let (program, args) = match &command.interpreter {
+            Some(interpreter) => (
+                interpreter.clone(),
+                std::iter::once(file_path).chain(rendered).collect(),
+            ),
+            None => (file_path, rendered),
+        };
+        let execution = Execution {
+            program,
+            args,
+            working_dir: working_dir.clone(),
+            env: vars,
+            stdin: (command.stdin == Stdin::Event)
+                .then(|| serde_json::to_vec(&scope.lookup(&["event"])).unwrap_or_default()),
+            timeout: Duration::from_secs(script.timeout_seconds),
+            kill_grace: Duration::from_secs(command.kill_grace_seconds),
+            max_output_bytes: command.max_output_bytes,
+            venv_bin: venv_bin.clone(),
+        };
+        let step = execute(ports, script, &execution, unit, request.dry_run).await;
+        let failed = !step.ok;
+        run.steps.push(step);
+        if failed && script.on_failure == api::OnFailure::Stop {
+            if let Some(file) = unit {
+                run.error = Some(format!("stopped after {file} failed (on_failure: stop)"));
+            }
+            break;
+        }
+    }
+    finish(run)
+}
+
+async fn execute(
+    ports: &Ports,
+    script: &Script,
+    execution: &Execution,
+    file: Option<&str>,
+    dry_run: bool,
+) -> Step {
+    let started = Instant::now();
+    let mut step = Step {
+        file: file.map(str::to_string),
+        action: "run".into(),
+        ..Step::default()
+    };
+    if dry_run {
+        // What would run, and the names of the variables it would get: never
+        // their values, a credential's among them.
+        let mut names: Vec<&str> = execution.env.iter().map(|(k, _)| k.as_str()).collect();
+        names.sort();
+        step.ok = true;
+        step.output = Some(format!(
+            "would run: {} {}\nin: {}\nwith: {}",
+            execution.program,
+            execution.args.join(" "),
+            execution.working_dir.display(),
+            names.join(", ")
+        ));
+        return step;
+    }
+    loop {
+        step.attempts += 1;
+        match ports.process.run(execution.clone()).await {
+            Err(e) => {
+                step.ok = false;
+                step.error = Some(e);
+                step.exit_code = None;
+            }
+            Ok(exited) => {
+                let ok = !exited.timed_out
+                    && exited
+                        .exit_code
+                        .is_some_and(|c| script.script.success_exit_codes.contains(&c));
+                step.exit_code = exited.exit_code;
+                step.output = Some(exited.output);
+                step.ok = ok;
+                step.error = if ok {
+                    None
+                } else if exited.timed_out {
+                    Some(format!("timed out after {}s", script.timeout_seconds))
+                } else {
+                    Some(match exited.exit_code {
+                        Some(code) => format!("exit code {code}"),
+                        None => "ended by a signal".to_string(),
+                    })
+                };
+            }
+        }
+        if step.ok || step.attempts >= script.retry.attempts {
+            break;
+        }
+        tokio::time::sleep(script.retry.delay(step.attempts + 1)).await;
+    }
+    step.duration_ms = started.elapsed().as_millis() as u64;
+    step
 }

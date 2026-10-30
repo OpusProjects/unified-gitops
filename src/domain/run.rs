@@ -45,6 +45,8 @@ pub struct Run {
     pub by: Option<String>,
     /// The commit the checkout was at when the run started
     pub revision: Option<String>,
+    /// A script's: the commit of the project its file is in
+    pub script_revision: Option<String>,
     /// A dry run: what would be sent, with nothing sent
     pub dry_run: bool,
     /// Unix seconds
@@ -157,6 +159,7 @@ mod tests {
             trigger: On::Change,
             by: None,
             revision: None,
+            script_revision: None,
             dry_run,
             started_at: 0,
             duration_ms: 0,

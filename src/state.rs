@@ -27,6 +27,7 @@ pub struct RuntimeConfig {
     pub webhooks: HashMap<String, Webhook>,
     // Read per run, so they reload like webhooks.
     pub apis: HashMap<String, crate::domain::api::Api>,
+    pub scripts: HashMap<String, crate::domain::script::Script>,
     // Carried for the same reason as `credentials`: the chain is rebuilt from
     // it on every reload.
     pub secrets: crate::config::SecretsConfig,
@@ -152,6 +153,8 @@ pub struct AppState {
     pub dispatcher: Arc<crate::application::webhooks::Dispatcher>,
     // What sends it: an HTTP client in production, a recorder in tests.
     pub http: Arc<dyn ports::http_sender::HttpSenderPort>,
+    // Runs script items' files: local processes in production.
+    pub process: Arc<dyn ports::process::ProcessPort>,
     // Runs the items that act on a change (application::actions).
     pub runner: Arc<crate::application::actions::Runner>,
 }
@@ -209,6 +212,7 @@ impl AppState {
             http: Arc::clone(&self.http),
             git: Arc::clone(&self.git),
             dispatcher: Arc::clone(&self.dispatcher),
+            process: Arc::clone(&self.process),
             projects_dir: self.projects_dir.clone(),
         });
     }

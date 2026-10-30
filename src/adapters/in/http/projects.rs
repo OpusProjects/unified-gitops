@@ -61,6 +61,8 @@ pub struct ProjectUsers {
     pub webhooks: Vec<String>,
     /// API items that act on its changes
     pub apis: Vec<String>,
+    /// Script items that act on its changes
+    pub scripts: Vec<String>,
 }
 
 #[utoipa::path(
@@ -126,6 +128,9 @@ pub async fn list_projects(
                 },
                 apis: crate::application::actions::watching(&config, id)
                     .remove(&crate::domain::run::Kind::Api)
+                    .unwrap_or_default(),
+                scripts: crate::application::actions::watching(&config, id)
+                    .remove(&crate::domain::run::Kind::Script)
                     .unwrap_or_default(),
             },
             sync_health: state.project_health.get(id).map(Into::into),

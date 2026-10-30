@@ -7,6 +7,7 @@ use crate::domain::api::Api;
 use crate::domain::api_key::{ApiKeyDef, ApiKeyRole};
 use crate::domain::credential::{Credential, CredentialRules};
 use crate::domain::project::GitProject;
+use crate::domain::script::Script;
 use crate::domain::webhook::Webhook;
 
 // Which files make up a configuration directory, and the rule an item name or
@@ -23,6 +24,7 @@ pub struct AppConfig {
     pub api_keys: HashMap<String, ApiKeyDef>,
     pub webhooks: HashMap<String, Webhook>,
     pub apis: HashMap<String, Api>,
+    pub scripts: HashMap<String, Script>,
 }
 
 fn vault_as_login(who: &str, credential_id: &str) -> String {
@@ -142,7 +144,14 @@ pub struct ConfigApiConfig {
 // API and the state directory use.
 
 // The top-level keys an item file may use.
-pub const SECTIONS: [&str; 5] = ["projects", "credentials", "api_keys", "webhooks", "apis"];
+pub const SECTIONS: [&str; 6] = [
+    "projects",
+    "credentials",
+    "api_keys",
+    "webhooks",
+    "apis",
+    "scripts",
+];
 
 // The settings a running process cannot adopt without being restarted, pulled
 // out of AppConfig as plain comparable values.
@@ -402,6 +411,33 @@ impl AppConfig {
             }
         }
 
+        // Scripts: their own settings, the project they watch and the one
+        // their file is in, and the credential they are given.
+        for (id, script) in &self.scripts {
+            errors.extend(script.errors(id, |expression| {
+                crate::adapters::r#in::scheduler::parse_cron(expression).map(|_| ())
+            }));
+            for project in [Some(&script.project), script.script.project.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                if !self.projects.contains_key(project) {
+                    errors.push(format!(
+                        "Script '{id}' references unknown project '{project}'"
+                    ));
+                }
+            }
+            if let Some(cred) = &script.credential {
+                if !self.credentials.contains_key(cred) {
+                    errors.push(format!(
+                        "Script '{id}' references unknown credential '{cred}'"
+                    ));
+                } else if self.is_vault(cred) {
+                    errors.push(vault_as_login(&format!("Script '{id}'"), cred));
+                }
+            }
+        }
+
         // The deprecated config.yaml Vault: a 0 bound fails every request.
         if self
             .secrets_config
@@ -623,18 +659,20 @@ pub fn load_config_detailed(dir: &Path) -> Result<AppConfig, ConfigErrors> {
         }
     }
     let mut section = |name: &str| entries.remove(name).unwrap_or_default();
-    let (c, pr, ak, nt, ap) = (
+    let (c, pr, ak, nt, ap, sc) = (
         section("credentials"),
         section("projects"),
         section("api_keys"),
         section("webhooks"),
         section("apis"),
+        section("scripts"),
     );
     let credentials = take("credential", c, &mut errors);
     let projects = take("project", pr, &mut errors);
     let api_keys = take("API key", ak, &mut errors);
     let webhooks = take("webhook", nt, &mut errors);
     let apis = take("API", ap, &mut errors);
+    let scripts = take("script", sc, &mut errors);
     if !errors.is_empty() {
         // Cross-references are only worth checking once every item parsed:
         // otherwise one typo'd credential also reports every project using it.
@@ -651,6 +689,7 @@ pub fn load_config_detailed(dir: &Path) -> Result<AppConfig, ConfigErrors> {
         api_keys,
         webhooks,
         apis,
+        scripts,
     };
 
     let errors = config.validate_errors();
@@ -962,6 +1001,34 @@ mod tests {
             "API 'a' references unknown project 'nope'",
             "API 'a' references unknown credential 'cred-x'",
             "API 'a': trigger.schedule 'every day' is not a cron schedule",
+        ] {
+            assert!(err.contains(expected), "missing {expected:?} in {err}");
+        }
+    }
+
+    #[test]
+    fn scripts_load_and_name_both_their_projects() {
+        let dir = dir_with(&[
+            ("projects.yaml", PROJECT),
+            (
+                "scripts/reload.yaml",
+                "scripts:\n  - name: reload\n    project: prj-state\n    script:\n      file: reload.sh\n",
+            ),
+        ]);
+        let cfg = load_config(dir.path().to_str().unwrap()).expect("loads");
+        assert_eq!(cfg.scripts["reload"].script.file, "reload.sh");
+        let dir = dir_with(&[
+            ("projects.yaml", PROJECT),
+            (
+                "scripts.yaml",
+                "scripts:\n  - name: s\n    project: prj-state\n    credential: cred-x\n    script:\n      project: prj-ops\n      file: ../x.sh\n",
+            ),
+        ]);
+        let err = load_err(&dir);
+        for expected in [
+            "Script 's' references unknown project 'prj-ops'",
+            "Script 's' references unknown credential 'cred-x'",
+            "Script 's': script.file '../x.sh' must stay inside",
         ] {
             assert!(err.contains(expected), "missing {expected:?} in {err}");
         }

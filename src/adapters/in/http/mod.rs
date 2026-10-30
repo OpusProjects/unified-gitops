@@ -14,6 +14,7 @@ pub mod metrics;
 pub mod openapi;
 pub mod projects;
 pub mod routes;
+pub mod scripts;
 pub mod session;
 pub mod settings;
 pub mod spec;
