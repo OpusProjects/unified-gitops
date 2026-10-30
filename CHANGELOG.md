@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0](https://github.com/OpusProjects/unified-gitops/compare/v0.4.0...v0.5.0) (2026-10-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* webhooks lose `type`, `ascender:`, `awx:` and `projects:` and name one `project`. `webhook.credentials` becomes the item's `credential`, `webhook.sign` becomes `webhook.signature`, `webhook.retries` becomes `retry.attempts`, and `{{field}}` placeholders become `$event.field`.
+* the `applications` and `connectors` sections, config.yaml's `state` block, the `/api/v1/applications`, `/api/v1/connectors` and `/api/v1/search` routes, the application webhook events and the `applications` field of api_keys, LDAP access rules and webhooks are removed; restricted keys and access rules name `projects`.
+
+### Added
+
+* call APIs with what a commit changed ([#39](https://github.com/OpusProjects/unified-gitops/issues/39)) ([65fb098](https://github.com/OpusProjects/unified-gitops/commit/65fb0982bc2e9f4258fe57fb31ff6e13fabe3d42))
+* make webhooks generic HTTP requests with every common option ([#38](https://github.com/OpusProjects/unified-gitops/issues/38)) ([aa0f450](https://github.com/OpusProjects/unified-gitops/commit/aa0f450b2354760cc342a7154159894f0c06cbcc))
+* remove applications and connectors ([10d55ab](https://github.com/OpusProjects/unified-gitops/commit/10d55ab5b684ffd74b7204df4a3130fff220401a))
+* run scripts when a commit changes what they watch ([#40](https://github.com/OpusProjects/unified-gitops/issues/40)) ([0248098](https://github.com/OpusProjects/unified-gitops/commit/0248098b7a2e5f0e49008d811927ed7874bf6a0d))
+
+
+### Fixed
+
+* count APIs and scripts in what --check-config and startup report ([#42](https://github.com/OpusProjects/unified-gitops/issues/42)) ([cbdb7c4](https://github.com/OpusProjects/unified-gitops/commit/cbdb7c44b5ab1e722fb19124e22661424d4e32d3))
+* list APIs and scripts in the API index, and keep dry runs out of an item's last run ([#43](https://github.com/OpusProjects/unified-gitops/issues/43)) ([d77665e](https://github.com/OpusProjects/unified-gitops/commit/d77665eb5716bfdd787541493eb451b6ddade4c2))
+
 ## [0.4.0] - 2026-10-29
 
 ### Added
