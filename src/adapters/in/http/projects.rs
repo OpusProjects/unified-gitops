@@ -59,6 +59,8 @@ pub struct ProjectInfo {
 pub struct ProjectUsers {
     /// Webhooks that tell this project's events
     pub webhooks: Vec<String>,
+    /// API items that act on its changes
+    pub apis: Vec<String>,
 }
 
 #[utoipa::path(
@@ -122,6 +124,9 @@ pub async fn list_projects(
                     ids.sort();
                     ids
                 },
+                apis: crate::application::actions::watching(&config, id)
+                    .remove(&crate::domain::run::Kind::Api)
+                    .unwrap_or_default(),
             },
             sync_health: state.project_health.get(id).map(Into::into),
             history: state
@@ -182,11 +187,7 @@ pub async fn sync_project_now(
         &id,
         project,
         &state.projects_dir,
-        Some(crate::application::projects::Announce {
-            dispatcher: &state.dispatcher,
-            webhooks: &config.webhooks,
-            url: config.url.as_deref(),
-        }),
+        Some(state.announce(&config)),
         crate::application::projects::RunOrigin {
             trigger: crate::domain::sync_health::RunTrigger::Manual,
             by: Some(auth.key_name.as_deref().unwrap_or("open").to_string()),

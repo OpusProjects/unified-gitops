@@ -37,6 +37,9 @@ pub fn create_router(state: Arc<AppState>, api_keys: Arc<ApiKeyRegistry>) -> Rou
         // would be a poor joke.
         .route("/api/v1", get(http::index::api_index))
         .route("/api/v1/", get(http::index::api_index))
+        .route("/api/v1/apis", get(http::apis::list_apis))
+        .route("/api/v1/apis/{id}", get(http::apis::get_api))
+        .route("/api/v1/apis/{id}/run", post(http::apis::run_api))
         .route("/api/v1/webhooks", get(http::webhooks::list_webhooks))
         .route("/api/v1/webhooks/{id}", get(http::webhooks::get_webhook))
         .route(

@@ -51,6 +51,7 @@ pub struct ConfigSummary {
     pub projects: usize,
     pub api_keys: usize,
     pub webhooks: usize,
+    pub apis: usize,
 }
 
 impl From<&reload_use_case::SectionDelta> for DeltaInfo {
@@ -75,6 +76,7 @@ pub struct ReloadInfo {
     pub projects: DeltaInfo,
     pub credentials: DeltaInfo,
     pub webhooks: DeltaInfo,
+    pub apis: DeltaInfo,
     /// How many API keys are in force after the reload
     pub api_keys: usize,
 }
@@ -104,6 +106,7 @@ fn summarize(cfg: &AppConfig) -> ConfigSummary {
         projects: cfg.projects.len(),
         api_keys: cfg.api_keys.len(),
         webhooks: cfg.webhooks.len(),
+        apis: cfg.apis.len(),
     }
 }
 
@@ -115,6 +118,7 @@ fn reload_info(report: &reload_use_case::ReloadReport, api_keys: usize) -> Reloa
         projects: (&report.projects).into(),
         credentials: (&report.credentials).into(),
         webhooks: (&report.webhooks).into(),
+        apis: (&report.apis).into(),
         api_keys,
     }
 }

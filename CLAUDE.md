@@ -3,8 +3,8 @@
 ## What is this
 
 Git-triggered ops automation inside your network, written in Rust. Pulls git projects and,
-when they change, tells webhooks; calling APIs and running scripts on a change are being added
-(`apis/`, `scripts/`). Sister project of [unified-api](https://github.com/OpusProjects/unified-api),
+when they change, calls APIs with the files that changed (`apis`) and tells webhooks
+(`webhooks`); running scripts on a change (`scripts`) is being added. Sister project of [unified-api](https://github.com/OpusProjects/unified-api),
 from whose 0.34.0 code it started; the web UI is the ui repository's `apps/unified-gitops`.
 
 ## Organization
@@ -40,11 +40,14 @@ src/
 │                             #   top-level key, `name` = identity); strict, every error at once
 ├── domain/
 │   ├── webhook.rs            # Webhook: project, events, path trigger, its request and body
+│   ├── api.rs                # Api: per file/commit, body, upsert, compare, on_delete, order
+│   ├── run.rs                # Run, Step, RunLog (history + failing → recovered), Kind
 │   ├── http.rs               # HttpSpec, shared by every outbound block: url, method, headers,
 │   │                         #   query, auth (bearer/basic/header/query/oauth2/login), signature,
 │   │                         #   statuses, TLS, proxy, rate limit; Retry; Wait (poll a job)
 │   ├── template.rs           # `$event.project` templates and `$poll.status == x` conditions
-│   ├── trigger.rs            # PathFilter: paths / ignore_paths globs over changed files
+│   ├── trigger.rs            # PathFilter (globs over changed files); Trigger: on change,
+│   │                         #   startup, schedule (cron), manual; debounce
 │   ├── yaml.rs               # YAML → JSON with exact scalars ("0644" stays a string)
 │   ├── credential.rs, api_key.rs, ldap.rs, project.rs, sync_health.rs
 ├── application/
@@ -52,14 +55,16 @@ src/
 │   ├── http.rs               # Engine: HttpSpec → request; auth tokens, signing, retries,
 │   │                         #   Retry-After, rate limits, wait polling
 │   ├── webhooks.rs           # event per pull (detect), message, body, queue + worker
+│   ├── actions.rs            # Runner: which items a commit starts, debounce, one run per item
+│   │                         #   at a time, an API run file by file, its record and events
 │   ├── credentials.rs, login.rs, config.rs (reload)
 ├── ports/                    # git, secrets, directory, config_store, venv,
 │                             #   http_sender (sends one built HTTP request)
 └── adapters/
-    ├── in/http/              # projects, webhooks, credentials, settings, users (auth), config,
+    ├── in/http/              # projects, apis, webhooks, credentials, settings, users (auth), config,
     │                         #   login, session, auth, metrics, health, html (browsable API),
     │                         #   ui_assets
-    ├── in/scheduler/         # project pulls; reload generations
+    ├── in/scheduler/         # project pulls; item cron schedules; reload generations
     └── out/
         ├── http_client/http.rs # HttpSenderPort → reqwest, one client per Transport
         ├── git/, secrets/, directory/, config/, python.rs
@@ -83,6 +88,9 @@ parsed strictly (`deny_unknown_fields`); restart-only keys are named in `Restart
   no receiver is special-cased. Every outbound request goes through `application/http.rs`.
 - **Templates are checked at load.** `$event.<field>` must be an event field (`EVENT_FIELDS`), a
   root must be available where it is written; what validates is what renders.
+- **Items act on what changed.** A pull lists the files its commits touched; each item whose
+  trigger selects one runs (application/actions.rs), with those files only. A scheduled,
+  startup or manual run takes every selected file in the checkout. A dry run reads, never writes.
 - **Locks.** One per checkout (a scheduled pull and a manual one never interleave). In-process:
   run ONE replica.
 - **Errors carry a body** (`ApiError` → `{"error": ...}`). Restricted keys and LDAP rules scope by

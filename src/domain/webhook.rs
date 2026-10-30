@@ -103,8 +103,8 @@ impl ContentType {
     }
 }
 
-// What happened to a project's checkout, as a webhook names it (one pull
-// produces at most one, application::webhooks::detect_pull).
+// What happened to a project's checkout (one pull produces at most one), or
+// to a run of one of its items (application::actions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Event {
@@ -115,6 +115,11 @@ pub enum Event {
     PullFailed,
     // Pulls work again after failing.
     PullRecovered,
+    // A run of an API item of the project: every one that worked, every one
+    // that failed, and the first that worked after failures.
+    ApiSucceeded,
+    ApiFailed,
+    ApiRecovered,
 }
 
 impl Event {
@@ -123,6 +128,9 @@ impl Event {
             Event::CommitPulled => "commit_pulled",
             Event::PullFailed => "pull_failed",
             Event::PullRecovered => "pull_recovered",
+            Event::ApiSucceeded => "api_succeeded",
+            Event::ApiFailed => "api_failed",
+            Event::ApiRecovered => "api_recovered",
         }
     }
 }
@@ -138,7 +146,7 @@ fn default_timeout_seconds() -> u64 {
 // The fields of an event message, which `$event.<field>` may name: every
 // event has the envelope, and each adds its own (null where it has none).
 // Checked at load, so a typo fails the push, not a send.
-pub const EVENT_FIELDS: [&str; 16] = [
+pub const EVENT_FIELDS: [&str; 22] = [
     "event",
     "project",
     "description",
@@ -155,6 +163,12 @@ pub const EVENT_FIELDS: [&str; 16] = [
     "files",
     "consecutive_failures",
     "failing_seconds",
+    "item",
+    "kind",
+    "trigger",
+    "ok",
+    "steps",
+    "duration_ms",
 ];
 
 const EVENT_CONTEXT: Allowed<'static> = Allowed {

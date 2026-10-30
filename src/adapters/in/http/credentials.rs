@@ -83,6 +83,8 @@ pub struct CredentialUsersInfo {
     pub projects: Vec<String>,
     /// Webhooks that send with it
     pub webhooks: Vec<String>,
+    /// API items that call with it
+    pub apis: Vec<String>,
     /// Whether the LDAP login's service account binds with it
     pub ldap: bool,
 }
@@ -176,6 +178,16 @@ pub async fn list_credentials(
                 credentials: users.credentials,
                 projects: users.projects,
                 webhooks: users.webhooks,
+                apis: {
+                    let mut ids: Vec<String> = config
+                        .apis
+                        .iter()
+                        .filter(|(_, a)| a.credentials().contains(&id))
+                        .map(|(a, _)| a.clone())
+                        .collect();
+                    ids.sort();
+                    ids
+                },
                 ldap: users.ldap,
             },
             vault_connection,
