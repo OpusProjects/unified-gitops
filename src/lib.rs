@@ -57,7 +57,7 @@ impl AppBuilder {
             projects: HashMap::new(),
             credentials: HashMap::new(),
             webhooks: HashMap::new(),
-            http: Arc::new(adapters::out::webhooks::http::ReqwestSender::new()),
+            http: Arc::new(adapters::out::http_client::http::ReqwestSender::new()),
             secrets_settings: config::SecretsConfig::default(),
             projects_dir: std::path::PathBuf::from("projects"),
             ui: crate::config::UiConfig::default(),

@@ -322,7 +322,7 @@ mod tests {
 
     #[tokio::test]
     async fn each_key_authenticates_as_itself() {
-        let app = test_app(vec![admin_key("awx", "key-a"), admin_key("forms", "key-b")]);
+        let app = test_app(vec![admin_key("ops", "key-a"), admin_key("forms", "key-b")]);
         let req = HttpRequest::builder()
             .uri("/protected")
             .header("x-api-key", "key-b")

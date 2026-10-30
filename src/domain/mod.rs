@@ -1,8 +1,11 @@
 pub mod api_key;
 pub mod credential;
+pub mod http;
 pub mod ldap;
 pub mod project;
 pub mod sync_health;
+pub mod template;
+pub mod trigger;
 pub mod webhook;
 pub mod yaml;
 

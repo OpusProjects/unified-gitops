@@ -39,12 +39,19 @@ src/
 ├── config.rs                 # config.yaml + item files at any depth (AWX-style CasC: typed
 │                             #   top-level key, `name` = identity); strict, every error at once
 ├── domain/
-│   ├── webhook.rs            # Webhook: events, projects, where and how it sends
+│   ├── webhook.rs            # Webhook: project, events, path trigger, its request and body
+│   ├── http.rs               # HttpSpec, shared by every outbound block: url, method, headers,
+│   │                         #   query, auth (bearer/basic/header/query/oauth2/login), signature,
+│   │                         #   statuses, TLS, proxy, rate limit; Retry; Wait (poll a job)
+│   ├── template.rs           # `$event.project` templates and `$poll.status == x` conditions
+│   ├── trigger.rs            # PathFilter: paths / ignore_paths globs over changed files
 │   ├── yaml.rs               # YAML → JSON with exact scalars ("0644" stays a string)
 │   ├── credential.rs, api_key.rs, ldap.rs, project.rs, sync_health.rs
 ├── application/
 │   ├── projects.rs           # pull a checkout (bounded by timeout_seconds), tell what it did
-│   ├── webhooks.rs           # event per pull (detect), message, request per type, queue + worker
+│   ├── http.rs               # Engine: HttpSpec → request; auth tokens, signing, retries,
+│   │                         #   Retry-After, rate limits, wait polling
+│   ├── webhooks.rs           # event per pull (detect), message, body, queue + worker
 │   ├── credentials.rs, login.rs, config.rs (reload)
 ├── ports/                    # git, secrets, directory, config_store, venv,
 │                             #   http_sender (sends one built HTTP request)
@@ -54,7 +61,7 @@ src/
     │                         #   ui_assets
     ├── in/scheduler/         # project pulls; reload generations
     └── out/
-        ├── webhooks/http.rs    # HttpSenderPort → reqwest (no redirects followed)
+        ├── http_client/http.rs # HttpSenderPort → reqwest, one client per Transport
         ├── git/, secrets/, directory/, config/, python.rs
 tests/                        # integration tests
 ```
@@ -72,6 +79,10 @@ parsed strictly (`deny_unknown_fields`); restart-only keys are named in `Restart
   has to reach in.
 - **One message per pull.** A pull produces at most one of `commit_pulled`, `pull_failed`,
   `pull_recovered`; a failure is told when it starts and the recovery when it ends.
+- **Webhooks are generic.** One HTTP request shaped by the item (`webhook.body` over `$event`);
+  no receiver is special-cased. Every outbound request goes through `application/http.rs`.
+- **Templates are checked at load.** `$event.<field>` must be an event field (`EVENT_FIELDS`), a
+  root must be available where it is written; what validates is what renders.
 - **Locks.** One per checkout (a scheduled pull and a manual one never interleave). In-process:
   run ONE replica.
 - **Errors carry a body** (`ApiError` → `{"error": ...}`). Restricted keys and LDAP rules scope by

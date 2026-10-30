@@ -3,6 +3,6 @@
 pub mod config;
 pub mod directory;
 pub mod git;
+pub mod http_client;
 pub mod python;
 pub mod secrets;
-pub mod webhooks;

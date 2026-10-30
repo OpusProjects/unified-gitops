@@ -183,7 +183,7 @@ async fn a_project_lists_what_uses_it() {
     .into_iter()
     .collect();
     let hook: unified_gitops::domain::webhook::Webhook = serde_saphyr::from_str(
-        "type: webhook\nevents: [commit_pulled]\nprojects: [prj-test]\nwebhook:\n  url: https://hooks.example.com/x\n",
+        "project: prj-test\nevents: [commit_pulled]\nwebhook:\n  url: https://hooks.example.com/x\n",
     )
     .unwrap();
     let app = unified_gitops::AppBuilder::new()

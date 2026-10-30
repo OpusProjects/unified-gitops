@@ -122,10 +122,12 @@ async fn the_service_end_to_end() {
         ))
         .unwrap()
     };
-    let hook: unified_gitops::domain::webhook::Webhook = serde_saphyr::from_str(&format!(
-        "type: webhook\nevents: [commit_pulled]\nprojects: all\nwebhook:\n  url: {url}\n  credentials: [cred-hook]\n  retries: 0\n"
-    ))
-    .unwrap();
+    let hook = |project: &str| -> unified_gitops::domain::webhook::Webhook {
+        serde_saphyr::from_str(&format!(
+            "project: {project}\nevents: [commit_pulled]\ncredential: cred-hook\nretry: {{attempts: 1}}\nwebhook:\n  url: {url}\n"
+        ))
+        .unwrap()
+    };
     let credential: unified_gitops::domain::credential::Credential =
         serde_saphyr::from_str("type: token\nenv_vars:\n  token: HOOK_TOKEN\n").unwrap();
 
@@ -143,7 +145,10 @@ async fn the_service_end_to_end() {
             ]),
             checkouts.path().to_path_buf(),
         )
-        .webhooks(HashMap::from([("hook".to_string(), hook)]))
+        .webhooks(HashMap::from([
+            ("hook".to_string(), hook("prj-interval")),
+            ("hook-cron".to_string(), hook("prj-cron")),
+        ]))
         .credentials(
             HashMap::from([("cred-hook".to_string(), credential)]),
             Default::default(),
@@ -165,7 +170,10 @@ async fn the_service_end_to_end() {
     let (status, creds) = call(&app, "GET", "/api/v1/credentials").await;
     assert_eq!(status, StatusCode::OK, "{creds}");
     assert_eq!(creds[0]["name"], "cred-hook");
-    assert_eq!(creds[0]["used_by"]["webhooks"], serde_json::json!(["hook"]));
+    assert_eq!(
+        creds[0]["used_by"]["webhooks"],
+        serde_json::json!(["hook", "hook-cron"])
+    );
     assert!(!creds.to_string().contains("t0k"));
 
     // Before any pull, both projects are pending.
@@ -177,7 +185,8 @@ async fn the_service_end_to_end() {
     // The webhook, its test send through the real client, and its history.
     let (status, list) = call(&app, "GET", "/api/v1/webhooks").await;
     assert_eq!(status, StatusCode::OK, "{list}");
-    assert_eq!(list[0]["all_projects"], true);
+    assert_eq!(list[0]["project"], "prj-interval");
+    assert_eq!(list[0]["request"]["auth"], "bearer");
     let (status, delivery) = call(&app, "POST", "/api/v1/webhooks/hook/test").await;
     assert_eq!(status, StatusCode::OK, "{delivery}");
     assert_eq!(delivery["ok"], true, "{delivery}");

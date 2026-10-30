@@ -65,7 +65,7 @@ fn a_broken_cross_reference_fails_like_startup_would() {
     // A webhook naming a project that does not exist — valid YAML, invalid config
     std::fs::write(
         dir.path().join("webhooks.yaml"),
-        "webhooks:\n  - name: src-a\n    description: \"A\"\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-missing]\n    webhook:\n      url: https://hooks.example.com/x\n",
+        "webhooks:\n  - name: src-a\n    description: \"A\"\n    project: prj-missing\n    events: [pull_failed]\n    webhook:\n      url: https://hooks.example.com/x\n",
     )
     .unwrap();
 

@@ -9,7 +9,7 @@ use crate::AppState;
 use crate::adapters::r#in::http::auth::AuthContext;
 use crate::adapters::r#in::http::error::{ApiError, ErrorBody};
 use crate::application::webhooks::{self, Delivery, Job};
-use crate::domain::webhook::{Event, WebhookType};
+use crate::domain::webhook::Event;
 
 // Webhooks: which events go where, and how the last send went.
 // Admin-only, like credentials: a webhook can name any project, and its
@@ -20,42 +20,45 @@ pub struct WebhookSummary {
     /// The item's identity, as in the configuration
     pub name: String,
     pub description: Option<String>,
-    #[serde(rename = "type")]
-    pub webhook_type: WebhookType,
+    pub enabled: bool,
+    /// The watched project whose events it tells
+    pub project: String,
+    pub labels: std::collections::BTreeMap<String, String>,
     pub events: Vec<Event>,
-    /// Every project, present and future (`projects: all`)
-    pub all_projects: bool,
-    /// The projects it listens to, when it names them; empty with
-    /// all_projects false = none
-    pub projects: Vec<String>,
+    /// For commit_pulled: the files a commit must touch to be told; empty
+    /// for every commit
+    pub paths: Vec<String>,
+    pub ignore_paths: Vec<String>,
     /// Where it sends: scheme and host only, never a path or query, which
     /// can carry a receiver's secret
     pub destination: String,
-    /// ascender and awx: the job template (or workflow job template) it starts
-    pub job_template: Option<u64>,
-    pub workflow_job_template: Option<u64>,
+    /// Every credential it reads: its own, a signature's, a client
+    /// certificate's
     pub credentials: Vec<String>,
-    /// How long one attempt may take, and how many times a send is retried
+    /// How long one attempt may take, and how many attempts a send makes
     pub timeout_seconds: u64,
-    pub retries: u32,
-    /// type webhook: its HTTP method, how the credential is sent, the names
-    /// of its fixed headers (never their values), whether it sends a template
-    /// or the default message, and the header its signature goes in, if signed
-    pub request: Option<RequestInfo>,
+    pub attempts: u32,
+    pub request: RequestInfo,
     /// The last send since this process started, if any
     pub last: Option<Delivery>,
 }
 
+// How it sends, without a value that could be secret: header names, never
+// their values.
 #[derive(Serialize, ToSchema)]
 pub struct RequestInfo {
     pub method: String,
-    /// bearer, basic, none, or header (the credential in `auth_header`)
+    /// none, bearer, basic, header, query, oauth2 or login
     pub auth: String,
-    pub auth_header: Option<String>,
     pub headers: Vec<String>,
-    /// true: a body template; false: the default message
+    pub query: Vec<String>,
+    pub content_type: crate::domain::webhook::ContentType,
+    /// true: a body template; false: the event message as it is
     pub templated: bool,
     pub signature_header: Option<String>,
+    /// Whether it follows what it started until a condition holds
+    pub waits: bool,
+    pub rate_limit: Option<String>,
 }
 
 #[utoipa::path(
@@ -86,52 +89,39 @@ pub async fn list_webhooks(
 
 // One webhook as the list shows it.
 fn info(state: &AppState, id: &str, n: &crate::domain::webhook::Webhook) -> WebhookSummary {
-    let target = n.ascender.as_ref().or(n.awx.as_ref());
-    let mut projects = n.projects.named().to_vec();
-    projects.sort();
+    let http = &n.webhook.http;
+    let auth = match &http.auth {
+        Some(auth) => auth.name(),
+        // Left out: a bearer token when there is a credential.
+        None if n.credential.is_some() => "bearer",
+        None => "none",
+    };
     WebhookSummary {
         name: id.to_string(),
         description: n.description.clone(),
-        webhook_type: n.webhook_type,
+        enabled: n.enabled,
+        project: n.project.clone(),
+        labels: n.labels.clone(),
         events: n.events.clone(),
-        all_projects: n.projects.is_all(),
-        projects,
+        paths: n.trigger.paths.clone(),
+        ignore_paths: n.trigger.ignore_paths.clone(),
         destination: n.destination(),
-        job_template: target.and_then(|t| t.job_template),
-        workflow_job_template: target.and_then(|t| t.workflow_job_template),
-        credentials: n.credentials().to_vec(),
-        timeout_seconds: n
-            .webhook
-            .as_ref()
-            .map(|w| w.timeout_seconds)
-            .or(target.map(|t| t.timeout_seconds))
-            .unwrap_or_default(),
-        retries: n
-            .webhook
-            .as_ref()
-            .map(|w| w.retries)
-            .or(target.map(|t| t.retries))
-            .unwrap_or_default(),
-        request: n.webhook.as_ref().map(|w| {
-            use crate::domain::webhook::{Auth, AuthScheme};
-            let (auth, auth_header) = match &w.auth {
-                Auth::Header(h) => ("header", Some(h.header.clone())),
-                Auth::Scheme(AuthScheme::Basic) => ("basic", None),
-                Auth::Scheme(AuthScheme::None) => ("none", None),
-                Auth::Scheme(AuthScheme::Bearer) => ("bearer", None),
-                // Left out: a bearer token when there is a credential.
-                Auth::Default if w.credentials.is_empty() => ("none", None),
-                Auth::Default => ("bearer", None),
-            };
-            RequestInfo {
-                method: w.method.clone(),
-                auth: auth.to_string(),
-                auth_header,
-                headers: w.headers.keys().cloned().collect(),
-                templated: w.body.is_some(),
-                signature_header: w.sign.as_ref().map(|s| s.header.clone()),
-            }
-        }),
+        credentials: n.credentials().into_iter().cloned().collect(),
+        timeout_seconds: n.timeout_seconds,
+        attempts: n.retry.attempts,
+        request: RequestInfo {
+            method: http.method_or("POST").to_string(),
+            auth: auth.to_string(),
+            headers: http.headers.keys().cloned().collect(),
+            query: http.query.keys().cloned().collect(),
+            content_type: n.webhook.content_type,
+            templated: n.webhook.body.is_some(),
+            signature_header: http.signature.as_ref().map(|s| s.header.clone()),
+            waits: n.webhook.wait.is_some(),
+            rate_limit: http
+                .rate_limit
+                .map(|r| format!("{} per {}s", r.requests, r.per_seconds)),
+        },
         last: state.dispatcher.log.last(id),
     }
 }
@@ -202,18 +192,19 @@ pub async fn test_webhook(
             "webhook '{id}' is not configured"
         )));
     };
-    let mut message = webhooks::test_message(&id, config.url.as_deref());
+    let mut message = webhooks::test_message(webhook, config.url.as_deref());
     message.insert("webhook".into(), serde_json::json!(id));
     let delivery = webhooks::deliver(
         &*state.secrets,
         &*state.http,
+        &state.dispatcher.engine,
         &state.dispatcher.log,
         Job {
             webhook_id: id.clone(),
             webhook: webhook.clone(),
             message,
         },
-        None,
+        webhooks::Mode::Test,
     )
     .await;
     crate::adapters::r#in::http::audit::record(

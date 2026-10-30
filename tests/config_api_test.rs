@@ -150,7 +150,7 @@ fn json(body: &str) -> serde_json::Value {
 
 // A source that references a project declared in the same push.
 const PROJECTS: &str = "projects:\n  - name: prj-inv\n    description: \"Inventory\"\n    git_url: \"https://example.invalid/i.git\"\n";
-const SOURCES: &str = "webhooks:\n  - name: src-dc4\n    description: \"DC4\"\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-inv]\n    webhook:\n      url: https://hooks.example.com/x\n";
+const SOURCES: &str = "webhooks:\n  - name: src-dc4\n    description: \"DC4\"\n    project: prj-inv\n    events: [pull_failed]\n    webhook:\n      url: https://hooks.example.com/x\n";
 
 // =========================================================================
 // It is off unless it is turned on
@@ -307,7 +307,7 @@ async fn validation_reports_every_problem_at_once_and_writes_nothing() {
 
     let body = serde_json::json!({
         "files": {
-            "webhooks.yaml": "webhooks:\n  - name: src-a\n    description: \"A\"\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-ghost]\n    webhook:\n      url: https://hooks.example.com/x\n",
+            "webhooks.yaml": "webhooks:\n  - name: src-a\n    description: \"A\"\n    project: prj-ghost\n    events: [pull_failed]\n    webhook:\n      url: https://hooks.example.com/x\n",
             "projects.yaml": "projects:\n  - name: prj-a\n    git_url: https://example.invalid/a.git\n    credentials: [cred-nowhere]\n"
         }
     });
@@ -345,7 +345,7 @@ async fn a_write_that_would_not_load_is_refused_and_the_directory_is_untouched()
         &app,
         put_yaml(
             "/api/v1/config/webhooks.yaml",
-            "webhooks:\n  - name: src-a\n    description: \"A\"\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-ghost]\n    webhook:\n      url: https://hooks.example.com/x\n",
+            "webhooks:\n  - name: src-a\n    description: \"A\"\n    project: prj-ghost\n    events: [pull_failed]\n    webhook:\n      url: https://hooks.example.com/x\n",
         ),
     )
     .await;

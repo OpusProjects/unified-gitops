@@ -46,6 +46,9 @@ git-rs = { git = "https://github.com/OpusProjects/git", tag = "v0.2.0" }
 # docs/development.md for building against a local checkout.
 web-rs = { git = "https://github.com/OpusProjects/web", tag = "v0.3.0" }
 tokio = { version = "1", features = ["full"] }
+# Query strings and form bodies, encoded as a browser would. Already in the
+# tree through reqwest.
+url = "2"
 # The CORS middleware wraps tower-http's CorsLayer around the rest of the
 # stack per request (Layer + oneshot from `util`), which is what makes the
 # origin list reloadable. Already in the tree as an axum dependency — this

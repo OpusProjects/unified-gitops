@@ -145,7 +145,7 @@ pub fn users_of(
     // and safe to remove.
     let mut webhook_ids: Vec<String> = webhooks
         .iter()
-        .filter(|(_, webhook)| webhook.credentials().iter().any(|c| c == credential_id))
+        .filter(|(_, webhook)| webhook.credentials().iter().any(|c| *c == credential_id))
         .map(|(id, _)| id.clone())
         .collect();
     webhook_ids.sort();
@@ -342,19 +342,24 @@ mod tests {
             (
                 "ntf-b".to_string(),
                 webhook(
-                    "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n  credentials: [cred-hook]\n",
+                    "project: p\nevents: [pull_failed]\ncredential: cred-hook\nwebhook:\n  url: https://x.example.com\n",
                 ),
             ),
             (
                 "ntf-a".to_string(),
                 webhook(
-                    "type: ascender\nevents: [pull_failed]\nprojects: all\nascender:\n  url: https://a.example.com\n  job_template: 1\n  credentials: [cred-hook]\n",
+                    "project: p
+events: [pull_failed]
+webhook:
+  url: https://x.example.com
+  signature: {credential: cred-hook}
+",
                 ),
             ),
             (
                 "ntf-c".to_string(),
                 webhook(
-                    "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n",
+                    "project: p\nevents: [pull_failed]\nwebhook:\n  url: https://x.example.com\n",
                 ),
             ),
         ]);

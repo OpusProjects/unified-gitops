@@ -27,7 +27,7 @@ impl HttpSenderPort for Recorder {
         Box::pin(async {
             Ok(OutboundResponse {
                 status: 200,
-                body: String::new(),
+                ..Default::default()
             })
         })
     }
@@ -118,7 +118,7 @@ async fn a_project_tells_its_commits_its_failures_and_its_recovery() {
     ))
     .unwrap();
     let hook: unified_gitops::domain::webhook::Webhook = serde_saphyr::from_str(
-        "type: webhook\nevents: [commit_pulled, pull_failed, pull_recovered]\nprojects: [prj-state]\nwebhook:\n  url: https://hooks.example.com/x\n  retries: 0\n",
+        "project: prj-state\nevents: [commit_pulled, pull_failed, pull_recovered]\nretry: {attempts: 1}\nwebhook:\n  url: https://hooks.example.com/x\n",
     )
     .unwrap();
 
@@ -202,6 +202,6 @@ async fn a_project_tells_its_commits_its_failures_and_its_recovery() {
 
     // The history records the project, and the API lists the selection.
     let (_, detail) = call(&app, "GET", "/api/v1/webhooks/hook").await;
-    assert_eq!(detail["projects"], serde_json::json!(["prj-state"]));
+    assert_eq!(detail["project"], "prj-state");
     assert_eq!(detail["history"][0]["project"], "prj-state");
 }

@@ -1,98 +1,104 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use utoipa::ToSchema;
 
-// A webhook: which events, from which projects, and where they go.
-// The `type` names the receiver; its settings live in the block of the same
-// name (`webhook:`, `ascender:`, `awx:`), so a block that belongs to another
-// type is a load error rather than settings silently ignored, and adding a
-// type later is a new block, with nothing to rename.
+use crate::domain::http::{self, HttpSpec, Retry, Wait};
+use crate::domain::template::{self, Allowed};
+use crate::domain::trigger::PathFilter;
+
+// A webhook: which events of which project, and the HTTP request that tells
+// them. Generic: any receiver that takes an HTTP request, shaped by
+// `webhook.body` into whatever that receiver expects.
+//
+//   webhooks:
+//     - name: notify
+//       project: infra
+//       events: [commit_pulled, pull_failed]
+//       trigger: {paths: [vcenter/**]}
+//       credential: cred-hook
+//       webhook:
+//         url: https://hooks.example.com/x
+//         body: {text: "$event.project: $event.event"}
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Webhook {
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(rename = "type")]
-    pub webhook_type: WebhookType,
+    // Off: kept in the configuration, never sent.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    // The watched project whose events it tells.
+    pub project: String,
+    // Free-form, for finding items in the UI and the API.
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
     pub events: Vec<Event>,
-    // `all`, or projects by name. Left out or `[]`: none, as an API key or
-    // an LDAP rule with no projects reaches none.
+    // For commit_pulled: only commits touching these files are told.
     #[serde(default)]
-    pub projects: Selection,
+    pub trigger: PathFilter,
+    // Read per send: `auth` and `signature` say which fields go where.
     #[serde(default)]
-    pub webhook: Option<HttpTarget>,
+    pub credential: Option<String>,
+    #[serde(default = "default_timeout_seconds")]
+    pub timeout_seconds: u64,
     #[serde(default)]
-    pub ascender: Option<JobTemplateTarget>,
-    #[serde(default)]
-    pub awx: Option<JobTemplateTarget>,
+    pub retry: Retry,
+    pub webhook: WebhookRequest,
 }
 
-// Which projects a webhook listens to: the word `all`, or a list.
+// The request: the shared HTTP settings plus what a webhook sends.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WebhookRequest {
+    pub http: HttpSpec,
+    pub content_type: ContentType,
+    // A template over $event; left out, the event message as it is.
+    pub body: Option<Value>,
+    pub wait: Option<Wait>,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(untagged)]
-pub enum Selection {
-    All(AllWord),
-    Named(Vec<String>),
+#[serde(deny_unknown_fields)]
+struct WebhookOwn {
+    #[serde(default)]
+    content_type: ContentType,
+    #[serde(default)]
+    body: Option<Value>,
+    #[serde(default)]
+    wait: Option<Wait>,
 }
 
-// The one word `projects:` takes instead of a list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+impl<'de> Deserialize<'de> for WebhookRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (http, own): (HttpSpec, WebhookOwn) = http::split(deserializer)?;
+        Ok(Self {
+            http,
+            content_type: own.content_type,
+            body: own.body,
+            wait: own.wait,
+        })
+    }
+}
+
+// How the body is written. json: as JSON. form: a mapping, URL-encoded
+// (application/x-www-form-urlencoded), nested values as JSON. text: the
+// body's text as it is (text/plain).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum AllWord {
-    All,
+pub enum ContentType {
+    #[default]
+    Json,
+    Form,
+    Text,
 }
 
-impl Default for Selection {
-    fn default() -> Self {
-        Selection::Named(Vec::new())
-    }
-}
-
-impl Selection {
-    pub fn is_all(&self) -> bool {
-        matches!(self, Selection::All(_))
-    }
-
-    // The names listed; empty for `all`.
-    pub fn named(&self) -> &[String] {
+impl ContentType {
+    pub fn mime(self) -> &'static str {
         match self {
-            Selection::All(_) => &[],
-            Selection::Named(names) => names,
-        }
-    }
-
-    pub fn includes(&self, name: &str) -> bool {
-        match self {
-            Selection::All(_) => true,
-            Selection::Named(names) => names.iter().any(|a| a == name),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        matches!(self, Selection::Named(names) if names.is_empty())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum WebhookType {
-    // Any HTTP receiver: its URL, method, headers, body and authentication.
-    Webhook,
-    // A job template in Ascender, through its own webhook receiver.
-    Ascender,
-    // The same in AWX. The routes are Ascender's today; they are separate
-    // types so neither carries the other's name, and either can follow its
-    // own product when they part.
-    Awx,
-}
-
-impl WebhookType {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            WebhookType::Webhook => "webhook",
-            WebhookType::Ascender => "ascender",
-            WebhookType::Awx => "awx",
+            ContentType::Json => "application/json",
+            ContentType::Form => "application/x-www-form-urlencoded",
+            ContentType::Text => "text/plain; charset=utf-8",
         }
     }
 }
@@ -121,130 +127,18 @@ impl Event {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HttpTarget {
-    pub url: String,
-    #[serde(default = "default_method")]
-    pub method: String,
-    // Resolved per send; `auth` says which of their fields go where.
-    #[serde(default)]
-    pub credentials: Vec<String>,
-    #[serde(default)]
-    pub auth: Auth,
-    // Fixed headers. Not secret: anything secret belongs in a credential.
-    #[serde(default)]
-    pub headers: BTreeMap<String, String>,
-    // A template with {{field}} placeholders; None sends the default message.
-    #[serde(default)]
-    pub body: Option<String>,
-    // An HMAC-SHA256 of the body, for receivers that check signatures.
-    #[serde(default)]
-    pub sign: Option<Signing>,
-    #[serde(default = "default_timeout_seconds")]
-    pub timeout_seconds: u64,
-    #[serde(default = "default_retries")]
-    pub retries: u32,
-}
-
-// How a credential reaches the receiver. Written as one word (`bearer`,
-// `basic`, `none`) or as `{header: Name}`.
-#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
-#[serde(untagged)]
-pub enum Auth {
-    Scheme(AuthScheme),
-    Header(HeaderAuth),
-    // `auth:` left out: a bearer token when there is a credential, nothing
-    // when there is none.
-    #[default]
-    #[serde(skip)]
-    Default,
-}
-
-// `auth: {header: Name}`: the credential's token in a header of that name.
-// Strict like every other block: `{header: X, value: y}` is a typo, not a
-// setting to ignore.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HeaderAuth {
-    pub header: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthScheme {
-    // Authorization: Bearer <token>
-    Bearer,
-    // Authorization: Basic base64(<username>:<password>)
-    Basic,
-    // Nothing: the credentials are only there for the body or a signature.
-    None,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Signing {
-    #[serde(default = "default_signature_header")]
-    pub header: String,
-    // Written before the hex digest, as GitHub writes `sha256=`.
-    #[serde(default = "default_signature_prefix")]
-    pub prefix: String,
-    // The credential field holding the shared secret.
-    #[serde(default = "default_signature_field")]
-    pub secret_field: String,
-}
-
-// A job template (or workflow job template) to start, in Ascender or AWX,
-// through the template's own webhook receiver in GitLab mode: its key in
-// X-Gitlab-Token, no user needed, and any event accepted. The playbook reads
-// the message as <prefix>_webhook_payload (ascender_, awx_ or tower_).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct JobTemplateTarget {
-    // The controller's address, without /api.
-    pub url: String,
-    #[serde(default)]
-    pub job_template: Option<u64>,
-    #[serde(default)]
-    pub workflow_job_template: Option<u64>,
-    // One credential, whose `token` is the template's webhook key.
-    #[serde(default)]
-    pub credentials: Vec<String>,
-    #[serde(default = "default_timeout_seconds")]
-    pub timeout_seconds: u64,
-    #[serde(default = "default_retries")]
-    pub retries: u32,
-}
-
-fn default_method() -> String {
-    "POST".to_string()
+fn yes() -> bool {
+    true
 }
 
 fn default_timeout_seconds() -> u64 {
     30
 }
 
-fn default_retries() -> u32 {
-    3
-}
-
-fn default_signature_header() -> String {
-    "X-Hub-Signature-256".to_string()
-}
-
-fn default_signature_prefix() -> String {
-    "sha256=".to_string()
-}
-
-fn default_signature_field() -> String {
-    "secret".to_string()
-}
-
-// The fields a body template may name: the keys of every message (a field
-// an event's message does not have is null),
-// plus a short revision. Checked at load, so a typo fails the push, not a
-// send.
-pub const TEMPLATE_FIELDS: [&str; 16] = [
+// The fields of an event message, which `$event.<field>` may name: every
+// event has the envelope, and each adds its own (null where it has none).
+// Checked at load, so a typo fails the push, not a send.
+pub const EVENT_FIELDS: [&str; 16] = [
     "event",
     "project",
     "description",
@@ -263,322 +157,89 @@ pub const TEMPLATE_FIELDS: [&str; 16] = [
     "failing_seconds",
 ];
 
-const METHODS: [&str; 3] = ["POST", "PUT", "PATCH"];
-
-// Longest a send may take: a receiver that never answers must not hold the
-// sender (and every webhook queued behind it) for long.
-const MAX_TIMEOUT_SECONDS: u64 = 300;
-const MAX_RETRIES: u32 = 10;
+const EVENT_CONTEXT: Allowed<'static> = Allowed {
+    roots: &["event"],
+    fields: &[("event", &EVENT_FIELDS)],
+};
 
 impl Webhook {
-    // Everything wrong with this item on its own; references to applications
-    // and credentials are checked by the loader, which knows them.
+    // Everything wrong with this item on its own; the project and the
+    // credentials it names are checked by the loader, which knows them.
     pub fn errors(&self, id: &str) -> Vec<String> {
         let mut errors = Vec::new();
-        let at = |what: String| format!("Webhook '{id}': {what}");
         if self.events.is_empty() {
-            errors.push(at("needs at least one event".to_string()));
+            errors.push("needs at least one event".to_string());
         }
-        // Every event is a project's: with no projects, none could be sent.
-        if self.projects.is_empty() {
-            errors.push(at(
-                "names no projects: list them in 'projects:', or write 'projects: all'".to_string(),
-            ));
+        if !self.trigger.is_everything() && !self.events.contains(&Event::CommitPulled) {
+            errors.push(
+                "trigger filters the files of a commit: it needs the commit_pulled event"
+                    .to_string(),
+            );
         }
-        let blocks = [
-            ("webhook", self.webhook.is_some()),
-            ("ascender", self.ascender.is_some()),
-            ("awx", self.awx.is_some()),
-        ];
-        let wanted = self.webhook_type.as_str();
-        for (block, present) in blocks {
-            if block == wanted && !present {
-                errors.push(at(format!("type {wanted} needs a '{wanted}:' block")));
+        errors.extend(self.trigger.errors("trigger"));
+        let request = &self.webhook;
+        errors.extend(request.http.errors(
+            "webhook",
+            self.credential.is_some(),
+            &http::Contexts {
+                request: EVENT_CONTEXT,
+            },
+        ));
+        if let Some(body) = &request.body {
+            errors.extend(template::errors("webhook.body", body, &EVENT_CONTEXT));
+            match (request.content_type, body) {
+                (ContentType::Form, Value::Object(_)) => {}
+                (ContentType::Form, _) => errors.push(
+                    "webhook.body must be a mapping with content_type form: its keys are the \
+                     form's fields"
+                        .to_string(),
+                ),
+                (ContentType::Text, Value::String(_)) => {}
+                (ContentType::Text, _) => {
+                    errors.push("webhook.body must be text with content_type text".to_string())
+                }
+                (ContentType::Json, _) => {}
             }
-            if block != wanted && present {
-                errors.push(at(format!(
-                    "a '{block}:' block does not belong to type {wanted}"
-                )));
-            }
         }
-        if let Some(webhook) = &self.webhook {
-            errors.extend(webhook.errors().into_iter().map(at));
+        if request.http.method_or("POST") == "GET" && request.body.is_some() {
+            errors.push("webhook.body is set but webhook.method GET sends none".to_string());
         }
-        for target in [&self.ascender, &self.awx].into_iter().flatten() {
-            errors.extend(target.errors().into_iter().map(at));
+        if let Some(wait) = &request.wait {
+            errors.extend(wait.errors("webhook", &EVENT_FIELDS));
         }
+        errors.extend(http::timeout_errors(self.timeout_seconds));
+        errors.extend(http::retry_errors(&self.retry));
         errors
+            .into_iter()
+            .map(|e| format!("Webhook '{id}': {e}"))
+            .collect()
     }
 
-    // The credentials this webhook names, whichever its type.
-    pub fn credentials(&self) -> &[String] {
-        if let Some(webhook) = &self.webhook {
-            return &webhook.credentials;
-        }
-        match (&self.ascender, &self.awx) {
-            (Some(target), _) | (None, Some(target)) => &target.credentials,
-            _ => &[],
-        }
+    // Every credential it reads: its own, the signature's, the TLS client
+    // certificate's.
+    pub fn credentials(&self) -> Vec<&String> {
+        self.credential
+            .iter()
+            .chain(self.webhook.http.extra_credentials())
+            .collect()
     }
 
-    // The credential fields a send reads by their bare names, and only those
-    // (application::webhooks): `token` for a bearer, default or header auth
-    // and for a job template's key, `username` and `password` for basic,
-    // and the signing secret's field. Any other field the credentials share
-    // is never read here, so it does not matter that it loses its bare name.
-    pub fn bare_fields(&self) -> Vec<&str> {
-        let Some(target) = &self.webhook else {
-            return if self.credentials().is_empty() {
-                Vec::new()
-            } else {
-                vec!["token"]
-            };
-        };
-        let mut fields = match &target.auth {
-            Auth::Scheme(AuthScheme::Bearer) | Auth::Default | Auth::Header(_) => vec!["token"],
-            Auth::Scheme(AuthScheme::Basic) => vec!["username", "password"],
-            Auth::Scheme(AuthScheme::None) => Vec::new(),
-        };
-        if let Some(sign) = &target.sign {
-            fields.push(sign.secret_field.as_str());
-        }
-        fields
-    }
-
-    // Whether this webhook wants `event` from `project`.
-    pub fn wants_project(&self, event: Event, project: &str) -> bool {
-        self.events.contains(&event) && self.projects.includes(project)
+    // Whether this webhook tells `event` of `project`. A commit is told only
+    // when it touched a file the trigger selects; `files` None (git could not
+    // list them) is told, rather than silently dropped.
+    pub fn wants(&self, event: Event, project: &str, files: Option<&[String]>) -> bool {
+        self.enabled
+            && self.project == project
+            && self.events.contains(&event)
+            && (event != Event::CommitPulled
+                || self.trigger.is_everything()
+                || files.is_none_or(|f| !self.trigger.select(f).is_empty()))
     }
 
     // Where it sends, without anything a URL can carry that is secret: a
     // chat webhook's path or query is often the credential itself.
     pub fn destination(&self) -> String {
-        let url = match (&self.webhook, &self.ascender, &self.awx) {
-            (Some(w), _, _) => &w.url,
-            (_, Some(t), _) | (_, _, Some(t)) => &t.url,
-            _ => return String::new(),
-        };
-        origin(url)
-    }
-}
-
-impl HttpTarget {
-    fn errors(&self) -> Vec<String> {
-        let mut errors = Vec::new();
-        errors.extend(url_errors("webhook.url", &self.url));
-        if !METHODS.contains(&self.method.as_str()) {
-            errors.push(format!(
-                "webhook.method '{}' must be one of {}",
-                self.method,
-                METHODS.join(", ")
-            ));
-        }
-        if let Some(body) = &self.body {
-            errors.extend(template_errors(body));
-        }
-        let needs_credential = match &self.auth {
-            Auth::Scheme(AuthScheme::Bearer | AuthScheme::Basic) | Auth::Header(_) => true,
-            Auth::Scheme(AuthScheme::None) | Auth::Default => false,
-        };
-        if needs_credential && self.credentials.is_empty() {
-            errors.push("webhook.auth needs a credential in webhook.credentials".to_string());
-        }
-        if let Auth::Header(HeaderAuth { header }) = &self.auth
-            && !is_header_name(header)
-        {
-            errors.push(format!(
-                "webhook.auth header '{header}' is not a header name"
-            ));
-        }
-        for name in self.headers.keys() {
-            if !is_header_name(name) {
-                errors.push(format!("webhook.headers '{name}' is not a header name"));
-            }
-        }
-        if let Some(sign) = &self.sign {
-            if !is_header_name(&sign.header) {
-                errors.push(format!(
-                    "webhook.sign header '{}' is not a header name",
-                    sign.header
-                ));
-            }
-            if self.credentials.is_empty() {
-                errors.push("webhook.sign needs a credential holding its secret".to_string());
-            }
-        }
-        // One header, one source: a fixed header with the name the auth or
-        // the signature writes would be sent twice.
-        let mut written: Vec<(&str, &str)> = Vec::new();
-        match &self.auth {
-            Auth::Scheme(AuthScheme::Bearer | AuthScheme::Basic) => {
-                written.push(("Authorization", "webhook.auth"))
-            }
-            Auth::Default if !self.credentials.is_empty() => {
-                written.push(("Authorization", "webhook.auth"))
-            }
-            Auth::Header(HeaderAuth { header }) => written.push((header, "webhook.auth")),
-            _ => {}
-        }
-        if let Some(sign) = &self.sign {
-            written.push((&sign.header, "webhook.sign"));
-        }
-        for (i, (name, by)) in written.iter().enumerate() {
-            if self.headers.keys().any(|h| h.eq_ignore_ascii_case(name)) {
-                errors.push(format!(
-                    "webhook.headers sets '{name}', which {by} writes: set it in one place"
-                ));
-            }
-            if written[..i]
-                .iter()
-                .any(|(other, _)| other.eq_ignore_ascii_case(name))
-            {
-                errors.push(format!(
-                    "webhook.auth and webhook.sign both write '{name}': give them different headers"
-                ));
-            }
-        }
-        errors.extend(bounds_errors("webhook", self.timeout_seconds, self.retries));
-        errors
-    }
-}
-
-impl JobTemplateTarget {
-    fn errors(&self) -> Vec<String> {
-        let mut errors = Vec::new();
-        errors.extend(url_errors("url", &self.url));
-        if self.url.trim_end_matches('/').ends_with("/api") || self.url.contains("/api/v2") {
-            errors.push(format!(
-                "url '{}…' is the controller's address, without /api",
-                origin(&self.url)
-            ));
-        }
-        match (self.job_template, self.workflow_job_template) {
-            (Some(_), Some(_)) => {
-                errors.push("set job_template or workflow_job_template, not both".to_string())
-            }
-            (None, None) => {
-                errors.push("needs a job_template or a workflow_job_template".to_string())
-            }
-            _ => {}
-        }
-        if self.credentials.len() != 1 {
-            errors.push(
-                "needs exactly one credential, whose token is the template's webhook key"
-                    .to_string(),
-            );
-        }
-        errors.extend(bounds_errors(
-            "job template",
-            self.timeout_seconds,
-            self.retries,
-        ));
-        errors
-    }
-
-    // The template's webhook receiver, GitLab mode.
-    pub fn endpoint(&self) -> String {
-        let (collection, id) = match (self.job_template, self.workflow_job_template) {
-            (Some(id), _) => ("job_templates", id),
-            (None, Some(id)) => ("workflow_job_templates", id),
-            (None, None) => ("job_templates", 0),
-        };
-        format!(
-            "{}/api/v2/{collection}/{id}/gitlab/",
-            self.url.trim_end_matches('/')
-        )
-    }
-}
-
-fn url_errors(field: &str, url: &str) -> Vec<String> {
-    if url.starts_with("https://") || url.starts_with("http://") {
-        Vec::new()
-    } else {
-        vec![format!(
-            "{field} '{}' must be an http:// or https:// address",
-            origin(url)
-        )]
-    }
-}
-
-fn bounds_errors(what: &str, timeout_seconds: u64, retries: u32) -> Vec<String> {
-    let mut errors = Vec::new();
-    if timeout_seconds == 0 || timeout_seconds > MAX_TIMEOUT_SECONDS {
-        errors.push(format!(
-            "{what} timeout_seconds must be between 1 and {MAX_TIMEOUT_SECONDS}"
-        ));
-    }
-    if retries > MAX_RETRIES {
-        errors.push(format!("{what} retries must be at most {MAX_RETRIES}"));
-    }
-    errors
-}
-
-// Placeholders a body names that no message has.
-fn template_errors(body: &str) -> Vec<String> {
-    placeholders(body)
-        .filter(|name| !TEMPLATE_FIELDS.contains(name))
-        .map(|name| {
-            format!(
-                "webhook.body names '{{{{{name}}}}}', which no message has (one of: {})",
-                TEMPLATE_FIELDS.join(", ")
-            )
-        })
-        .collect()
-}
-
-// Every {{name}} in a template, in order.
-pub fn placeholders(template: &str) -> impl Iterator<Item = &str> {
-    template_parts(template).filter_map(|part| match part {
-        TemplatePart::Field(name) => Some(name),
-        TemplatePart::Text(_) => None,
-    })
-}
-
-// A template, split once, the same way for checking it at load and for
-// rendering it: text, and the {{field}} placeholders in it. A `{{` with no
-// `}}` after it, or with nothing between them, is text.
-pub enum TemplatePart<'a> {
-    Text(&'a str),
-    Field(&'a str),
-}
-
-pub fn template_parts(template: &str) -> impl Iterator<Item = TemplatePart<'_>> {
-    let mut pieces = template.split("{{");
-    let first = pieces.next().map(TemplatePart::Text);
-    first.into_iter().chain(pieces.flat_map(|piece| {
-        match piece.split_once("}}") {
-            Some((name, after)) if !name.trim().is_empty() => [
-                Some(TemplatePart::Field(name.trim())),
-                Some(TemplatePart::Text(after)),
-            ],
-            // Not a placeholder: the `{{` is text, and so is what follows it.
-            _ => [
-                Some(TemplatePart::Text("{{")),
-                Some(TemplatePart::Text(piece)),
-            ],
-        }
-        .into_iter()
-        .flatten()
-    }))
-}
-
-fn is_header_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
-
-// scheme://host[:port] of a URL, or the text up to its first '/' after the
-// scheme; never its user info, path or query.
-pub fn origin(url: &str) -> String {
-    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
-    if scheme.is_empty() {
-        host.to_string()
-    } else {
-        format!("{scheme}://{host}")
+        http::origin(&self.webhook.http.url)
     }
 }
 
@@ -590,170 +251,88 @@ mod tests {
         serde_saphyr::from_str(yaml).unwrap()
     }
 
+    const BASE: &str = "project: p\nevents: [commit_pulled, pull_failed]\n";
+
     #[test]
-    fn a_webhook_with_its_block_is_valid() {
-        let n = parse(
-            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://alerts.example.com/x\n",
-        );
+    fn a_webhook_needs_only_a_project_events_and_a_url() {
+        let n = parse(&format!("{BASE}webhook:\n  url: https://x.example.com/h\n"));
         assert!(n.errors("n").is_empty(), "{:?}", n.errors("n"));
-        assert_eq!(n.webhook.unwrap().method, "POST");
+        assert!(n.enabled);
+        assert_eq!(n.webhook.http.method_or("POST"), "POST");
+        assert_eq!(n.webhook.content_type, ContentType::Json);
+        assert_eq!(n.retry.attempts, 4);
+        assert_eq!(n.destination(), "https://x.example.com");
     }
 
     #[test]
-    fn the_type_and_its_block_must_agree() {
-        let n = parse(
-            "type: ascender\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://alerts.example.com/x\n",
-        );
+    fn every_option_parses() {
+        let n = parse(&format!(
+            "{BASE}description: All of it\nenabled: false\nlabels: {{team: ops}}\ntrigger:\n  paths: [vcenter/**]\n  ignore_paths: ['**/*.md']\ncredential: cred-hook\ntimeout_seconds: 10\nretry: {{attempts: 2, backoff: fixed, initial_delay_seconds: 5, max_delay_seconds: 5}}\nwebhook:\n  url: https://jobs.example.com/api/v2/job_templates/42/launch/\n  method: POST\n  headers: {{X-Team: ops}}\n  query: {{dry: 'false'}}\n  auth: bearer\n  signature: {{header: X-Signature, algorithm: sha512, encoding: base64, timestamp_header: X-Timestamp}}\n  success_status: [201]\n  retry_on_status: [503]\n  follow_redirects: true\n  tls: {{ca_file: /etc/ca.pem, client_credential: cred-mtls}}\n  proxy: http://proxy:3128\n  rate_limit: {{requests: 5, per_seconds: 1}}\n  content_type: json\n  body:\n    limit: vcenter\n    extra_vars: {{gitops: $event, site: madrid}}\n  wait:\n    url: https://jobs.example.com$response.url\n    until: $poll.status == successful\n    fail_if: $poll.status in [failed, error, canceled]\n    interval_seconds: 5\n    timeout_seconds: 600\n"
+        ));
+        assert!(n.errors("n").is_empty(), "{:?}", n.errors("n"));
+        assert!(!n.enabled);
+        assert_eq!(n.credentials(), ["cred-hook", "cred-mtls"]);
+    }
+
+    #[test]
+    fn templates_and_shapes_are_checked() {
+        let n = parse(&format!(
+            "{BASE}webhook:\n  url: https://x.example.com\n  body: {{a: $event.projcet, b: $file}}\n"
+        ));
         let errors = n.errors("n").join("\n");
-        assert!(
-            errors.contains("type ascender needs a 'ascender:' block"),
-            "{errors}"
-        );
-        assert!(
-            errors.contains("'webhook:' block does not belong to type ascender"),
-            "{errors}"
-        );
+        assert!(errors.contains("$event.projcet"), "{errors}");
+        assert!(errors.contains("$file"), "{errors}");
+        let n = parse(&format!(
+            "{BASE}webhook:\n  url: https://x.example.com\n  content_type: form\n  body: [a]\n"
+        ));
+        assert!(n.errors("n").join("").contains("must be a mapping"));
+        let n = parse(&format!(
+            "{BASE}webhook:\n  url: https://x.example.com\n  content_type: text\n  body: {{a: 1}}\n"
+        ));
+        assert!(n.errors("n").join("").contains("must be text"));
+        let n = parse(&format!(
+            "{BASE}webhook:\n  url: https://x.example.com\n  method: GET\n  body: x\n"
+        ));
+        assert!(n.errors("n").join("").contains("GET sends none"));
     }
 
     #[test]
-    fn an_unknown_event_or_key_fails_to_parse() {
-        assert!(
-            serde_saphyr::from_str::<Webhook>(
-                "type: webhook\nevents: [drifted]\nprojects: all\nwebhook:\n  url: https://x.example.com\n"
-            )
-            .is_err()
-        );
-        assert!(serde_saphyr::from_str::<Webhook>(
-            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n  token: x\n"
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn a_body_may_only_name_message_fields() {
-        let n = parse(
-            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n  body: '{\"a\": \"{{project}}\", \"b\": {{chnages}}}'\n",
-        );
-        let errors = n.errors("n").join("\n");
-        assert!(errors.contains("'{{chnages}}'"), "{errors}");
-        assert!(!errors.contains("{{project}}"), "{errors}");
-        assert_eq!(n.errors("n").len(), 1, "{errors}");
-    }
-
-    #[test]
-    fn auth_takes_a_scheme_or_a_header() {
-        let bearer = parse(
-            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n  credentials: [c]\n  auth: basic\n",
-        );
-        assert_eq!(
-            bearer.webhook.unwrap().auth,
-            Auth::Scheme(AuthScheme::Basic)
-        );
-        let header = parse(
-            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n  credentials: [c]\n  auth: {header: X-Gitlab-Token}\n",
-        );
-        assert_eq!(
-            header.webhook.unwrap().auth,
-            Auth::Header(HeaderAuth {
-                header: "X-Gitlab-Token".into()
-            })
-        );
-        // Strict: a key the header form does not have is an error.
-        assert!(serde_saphyr::from_str::<Webhook>(
-            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n  credentials: [c]\n  auth: {header: X-Key, value: y}\n"
-        )
-        .is_err());
-        // One header, one source.
-        let twice = parse(
-            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n  credentials: [c]\n  headers: {authorization: x}\n",
-        );
-        assert!(twice.errors("n").join("").contains("set it in one place"));
-        let missing = parse(
-            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n  auth: bearer\n",
-        );
-        assert!(missing.errors("n").join("").contains("needs a credential"));
-    }
-
-    #[test]
-    fn a_job_template_target_names_one_template_and_one_credential() {
-        let n = parse(
-            "type: ascender\nevents: [commit_pulled]\nprojects: all\nascender:\n  url: https://ascender.example.com\n  job_template: 7\n  credentials: [k]\n",
-        );
-        assert!(n.errors("n").is_empty(), "{:?}", n.errors("n"));
-        let target = n.ascender.unwrap();
-        assert_eq!(
-            target.endpoint(),
-            "https://ascender.example.com/api/v2/job_templates/7/gitlab/"
-        );
-
-        let workflow = parse(
-            "type: awx\nevents: [commit_pulled]\nprojects: all\nawx:\n  url: https://awx.example.com/\n  workflow_job_template: 9\n  credentials: [k]\n",
-        );
-        assert_eq!(
-            workflow.awx.unwrap().endpoint(),
-            "https://awx.example.com/api/v2/workflow_job_templates/9/gitlab/"
-        );
-        // The launch API is not a way in: trigger and extra_vars are unknown keys.
-        assert!(serde_saphyr::from_str::<Webhook>(
-            "type: ascender\nevents: [commit_pulled]\nprojects: all\nascender:\n  url: https://a.example.com\n  job_template: 7\n  credentials: [k]\n  trigger: launch\n"
-        )
-        .is_err());
-
-        let wrong = parse(
-            "type: ascender\nevents: [commit_pulled]\nprojects: all\nascender:\n  url: https://ascender.example.com/api/v2\n  job_template: 7\n  workflow_job_template: 8\n",
-        );
-        let errors = wrong.errors("n").join("\n");
-        assert!(errors.contains("without /api"), "{errors}");
-        assert!(errors.contains("not both"), "{errors}");
-        assert!(errors.contains("exactly one credential"), "{errors}");
-    }
-
-    #[test]
-    fn wants_filters_on_event_and_project() {
-        let n = parse(
-            "type: webhook\nevents: [commit_pulled]\nprojects: [p]\nwebhook:\n  url: https://x.example.com\n",
-        );
-        assert!(n.errors("n").is_empty(), "{:?}", n.errors("n"));
-        assert!(n.wants_project(Event::CommitPulled, "p"));
-        assert!(!n.wants_project(Event::CommitPulled, "q"));
-        assert!(!n.wants_project(Event::PullFailed, "p"));
-        let all = parse(
-            "type: webhook\nevents: [pull_failed]\nprojects: all\nwebhook:\n  url: https://x.example.com\n",
-        );
-        assert!(all.projects.is_all());
-        assert!(all.wants_project(Event::PullFailed, "anything"));
-        assert!(
-            serde_saphyr::from_str::<Webhook>(
-                "type: webhook\nevents: [pull_failed]\nprojects: every\nwebhook:\n  url: https://x.example.com\n"
-            )
-            .is_err()
-        );
-    }
-
-    // Left out or empty: none, as an API key with no projects — refused, as
-    // it could never send.
-    #[test]
-    fn a_webhook_needs_projects() {
+    fn unknown_keys_fail_in_either_half_of_the_block() {
         for yaml in [
-            "type: webhook\nevents: [pull_failed]\nwebhook:\n  url: https://x.example.com\n",
-            "type: webhook\nevents: [pull_failed]\nprojects: []\nwebhook:\n  url: https://x.example.com\n",
+            format!("{BASE}webhook:\n  url: https://x\n  bdoy: x\n"),
+            format!("{BASE}webhook:\n  url: https://x\n  tls: {{cafile: x}}\n"),
+            format!("{BASE}type: webhook\nwebhook:\n  url: https://x\n"),
+            "project: p\nevents: [drift_detected]\nwebhook:\n  url: https://x\n".to_string(),
         ] {
-            let n = parse(yaml);
-            assert!(!n.wants_project(Event::PullFailed, "anything"));
-            assert!(
-                n.errors("n").join("").contains("names no projects"),
-                "{:?}",
-                n.errors("n")
-            );
+            assert!(serde_saphyr::from_str::<Webhook>(&yaml).is_err(), "{yaml}");
         }
     }
 
     #[test]
-    fn the_destination_never_shows_a_path_or_user_info() {
-        assert_eq!(
-            origin("https://user:pw@hooks.example.com/services/T0/B0/secret?x=1"),
-            "https://hooks.example.com"
+    fn wants_filters_on_project_event_and_files() {
+        let n = parse(&format!(
+            "{BASE}trigger: {{paths: [users/**]}}\nwebhook:\n  url: https://x\n"
+        ));
+        let touched =
+            |files: &[&str]| -> Vec<String> { files.iter().map(|f| f.to_string()).collect() };
+        assert!(n.wants(Event::CommitPulled, "p", Some(&touched(&["users/a.json"]))));
+        assert!(!n.wants(Event::CommitPulled, "p", Some(&touched(&["roles/r.json"]))));
+        assert!(n.wants(Event::CommitPulled, "p", None));
+        assert!(!n.wants(Event::CommitPulled, "q", None));
+        assert!(n.wants(Event::PullFailed, "p", None));
+        assert!(!n.wants(Event::PullRecovered, "p", None));
+        let off = parse(&format!(
+            "{BASE}enabled: false\nwebhook:\n  url: https://x\n"
+        ));
+        assert!(!off.wants(Event::PullFailed, "p", None));
+        let no_commits = parse(
+            "project: p\nevents: [pull_failed]\ntrigger: {paths: [a]}\nwebhook:\n  url: https://x\n",
         );
-        assert_eq!(origin("http://127.0.0.1:9000/x"), "http://127.0.0.1:9000");
+        assert!(
+            no_commits
+                .errors("n")
+                .join("")
+                .contains("needs the commit_pulled event")
+        );
     }
 }

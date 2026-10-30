@@ -93,7 +93,7 @@ fn app_home(ldap: Option<LdapConfig>, home: &str) -> axum::Router {
         .api_keys(vec![ResolvedApiKey {
             id: "AWX".to_string(),
             name: "AWX".to_string(),
-            secret: "awx-secret".to_string(),
+            secret: "ops-secret".to_string(),
             permissions: Permissions::Admin,
         }])
         .build()
@@ -201,7 +201,7 @@ async fn an_admin_group_member_gets_an_admin_session() {
     assert_eq!(auth["ldap"]["bind_credential"], "cred-ldap");
     assert_eq!(auth["ldap"]["access"][0]["name"], "Operations");
     assert_eq!(auth["api_keys"][0]["name"], "AWX");
-    assert!(!auth.to_string().contains("awx-secret"));
+    assert!(!auth.to_string().contains("ops-secret"));
     assert!(!auth.to_string().contains("\"svc\""));
 }
 
@@ -244,7 +244,7 @@ async fn a_valid_account_no_rule_names_is_refused_and_told_why() {
 #[tokio::test]
 async fn an_api_key_still_logs_in_next_to_ldap() {
     let app = app(Some(ldap()));
-    let resp = submit(&app, "key=awx-secret").await;
+    let resp = submit(&app, "key=ops-secret").await;
     let session = cookie(&resp, "ugitops_session").expect("a session cookie");
     let (_, auth) = get_json(&app, "/api/v1/auth", &session).await;
     assert_eq!(auth["me"]["name"], "AWX");
@@ -435,7 +435,7 @@ async fn a_header_caller_is_given_no_csrf_token() {
     let resp = app(Some(ldap()))
         .oneshot(
             Request::get("/api/v1/auth")
-                .header("x-api-key", "awx-secret")
+                .header("x-api-key", "ops-secret")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -510,7 +510,7 @@ async fn a_session_reads_protected_metrics() {
         .api_keys(vec![ResolvedApiKey {
             id: "AWX".to_string(),
             name: "AWX".to_string(),
-            secret: "awx-secret".to_string(),
+            secret: "ops-secret".to_string(),
             permissions: Permissions::Admin,
         }])
         .build();
