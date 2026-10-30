@@ -150,9 +150,10 @@ Same process as unified-api (see its CLAUDE.md, and `docs/releasing.md` here): r
 that bumps `Cargo.toml`, `Cargo.lock` and the manifest and writes the CHANGELOG from the squashed PR
 titles. A PR's title is its CHANGELOG line and decides the version (`feat:` MINOR, `fix:`/`perf:`
 PATCH, hidden types release nothing), so write it for a release-notes reader. CI on the release PR is
-dispatched by `release.yml` (`gh workflow run build.yaml --ref release-please--branches--main` if it
-is missing). Merging it is the release: tag `vX.Y.Z`, GitHub Release, and the image
-`ghcr.io/opusprojects/unified-gitops` as `X.Y.Z`, `<sha>` and `latest`. Never bump, tag or release by
+dispatched by `release.yml` (`gh workflow run build.yaml --ref release-please--branches--main--components--unified-gitops` if it
+is missing). Merging it is the release: the image `ghcr.io/opusprojects/unified-gitops` as `X.Y.Z`,
+`<sha>` and `latest` first, then the tag `vX.Y.Z` and the GitHub Release (created as a draft, published
+once the image is pushed, so nothing is tagged that cannot be pulled). Never bump, tag or release by
 hand; `UI_REF` in `docker/Dockerfile` moves in its own `build:` PR.
 
 ## Conventions
