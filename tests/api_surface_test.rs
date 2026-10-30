@@ -164,6 +164,9 @@ async fn the_service_end_to_end() {
     // instance without a secret value.
     let (status, index) = call(&app, "GET", "/api/v1/").await;
     assert_eq!(status, StatusCode::OK, "{index}");
+    assert_eq!(index["apis"], "/api/v1/apis");
+    assert_eq!(index["scripts"], "/api/v1/scripts");
+    assert!(index.get("applications").is_none() && index.get("search").is_none());
     let (status, settings) = call(&app, "GET", "/api/v1/settings").await;
     assert_eq!(status, StatusCode::OK, "{settings}");
     assert!(settings["version"].is_string());

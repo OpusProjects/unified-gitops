@@ -23,19 +23,15 @@ use crate::adapters::r#in::http::auth::AuthContext;
 pub struct ApiIndex {
     /// The running version, same source as the OpenAPI spec's
     pub version: &'static str,
-    /// Desired state and how it stands against the live systems
-    pub applications: &'static str,
-    /// Find an object on the systems by key or value: `?q=`
-    pub search: &'static str,
-    /// Admin-only; absent for a restricted key
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub connectors: Option<&'static str>,
+    /// The watched repositories (a restricted key sees its own)
+    pub projects: &'static str,
+    /// APIs called when a project changes (a restricted key sees its projects')
+    pub apis: &'static str,
+    /// Scripts run when a project changes (a restricted key sees its projects')
+    pub scripts: &'static str,
     /// Admin-only; absent for a restricted key
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webhooks: Option<&'static str>,
-    /// Admin-only route; absent for a restricted key
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub projects: Option<&'static str>,
     /// Admin-only, and only when config_api.enabled is on
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<&'static str>,
@@ -71,11 +67,10 @@ pub async fn api_index(
 
     Json(ApiIndex {
         version: env!("CARGO_PKG_VERSION"),
-        applications: "/api/v1/applications",
-        search: "/api/v1/search",
-        connectors: admin.then_some("/api/v1/connectors"),
+        projects: "/api/v1/projects",
+        apis: "/api/v1/apis",
+        scripts: "/api/v1/scripts",
         webhooks: admin.then_some("/api/v1/webhooks"),
-        projects: admin.then_some("/api/v1/projects"),
         // Same condition the config handlers enforce: the routes exist in the
         // router either way, and answer 403 when no store is configured.
         config: (admin && state.config_store.is_some()).then_some("/api/v1/config"),
