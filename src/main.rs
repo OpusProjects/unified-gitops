@@ -29,10 +29,13 @@ async fn main() {
                     println!("deprecated: {notice}");
                 }
                 println!(
-                    "configuration OK ({}): {} credentials, {} projects, {} webhooks",
+                    "configuration OK ({}): {} credentials, {} projects, {} apis, {} scripts, \
+                     {} webhooks",
                     config_dir,
                     cfg.credentials.len(),
                     cfg.projects.len(),
+                    cfg.apis.len(),
+                    cfg.scripts.len(),
                     cfg.webhooks.len(),
                 );
                 return;
@@ -99,6 +102,8 @@ async fn main() {
     }
 
     info!(
+        apis = cfg.apis.len(),
+        scripts = cfg.scripts.len(),
         webhooks = cfg.webhooks.len(),
         credentials = cfg.credentials.len(),
         projects = cfg.projects.len(),
