@@ -5,6 +5,7 @@
 // exists in ONE place only.
 pub mod config;
 pub mod credentials;
+pub mod http;
 pub mod login;
 pub mod projects;
 pub mod webhooks;

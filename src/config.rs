@@ -23,40 +23,6 @@ pub struct AppConfig {
     pub webhooks: HashMap<String, Webhook>,
 }
 
-// Two credentials delivered under one id would overwrite each other's
-// CREDENTIAL_<ID>_<FIELD> values, silently.
-fn delivery_clashes(who: &str, credential_ids: &[String]) -> Vec<String> {
-    let mut by_id: std::collections::BTreeMap<String, Vec<&String>> = Default::default();
-    for cred_id in credential_ids {
-        let ids = by_id
-            .entry(crate::domain::credential::delivery_id(cred_id))
-            .or_default();
-        // Listed twice is still one credential.
-        if !ids.contains(&cred_id) {
-            ids.push(cred_id);
-        }
-    }
-    by_id
-        .into_iter()
-        .filter(|(_, ids)| ids.len() > 1)
-        .map(|(delivered, ids)| {
-            format!(
-                "{who} uses credentials {} that are all delivered as CREDENTIAL_{}_* — \
-                 rename one",
-                quoted(&ids),
-                delivered.to_uppercase()
-            )
-        })
-        .collect()
-}
-
-fn quoted(ids: &[&String]) -> String {
-    ids.iter()
-        .map(|c| format!("'{c}'"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 fn vault_as_login(who: &str, credential_id: &str) -> String {
     format!(
         "{who} uses credential '{credential_id}', which is a Vault connection: name the \
@@ -392,16 +358,15 @@ impl AppConfig {
             }
         }
 
-        // Webhooks: their own settings, then the projects they listen to and
-        // the credentials they send with.
+        // Webhooks: their own settings, then the project they watch and the
+        // credentials they send with.
         for (id, webhook) in &self.webhooks {
             errors.extend(webhook.errors(id));
-            for project_id in webhook.projects.named() {
-                if !self.projects.contains_key(project_id) {
-                    errors.push(format!(
-                        "Webhook '{id}' references unknown project '{project_id}'"
-                    ));
-                }
+            if !self.projects.contains_key(&webhook.project) {
+                errors.push(format!(
+                    "Webhook '{id}' references unknown project '{}'",
+                    webhook.project
+                ));
             }
             for cred in webhook.credentials() {
                 if !self.credentials.contains_key(cred) {
@@ -412,11 +377,6 @@ impl AppConfig {
                     errors.push(vault_as_login(&format!("Webhook '{id}'"), cred));
                 }
             }
-            errors.extend(delivery_clashes(
-                &format!("Webhook '{id}'"),
-                webhook.credentials(),
-            ));
-            errors.extend(self.shared_field_errors(id, webhook));
         }
 
         // The deprecated config.yaml Vault: a 0 bound fails every request.
@@ -510,59 +470,6 @@ impl AppConfig {
             .collect();
         notices.sort();
         notices
-    }
-
-    // A webhook reads some of its credentials' fields by their bare names
-    // (Webhook::bare_fields: `token`, or `username` and `password`, and the
-    // signing secret's field), and a field two of them have is delivered
-    // under neither bare name: a default auth would silently send no
-    // Authorization, and bearer, header, basic or a signature would fail at
-    // every send for a field that seems to be there. Only those fields are
-    // checked (any other the credentials share is never read by name), and
-    // compared as the variable they become, so `Token` and `token` are one.
-    // Refused where the configuration says which fields a credential has.
-    fn shared_field_errors(&self, id: &str, webhook: &Webhook) -> Vec<String> {
-        use crate::domain::credential::variable_part;
-        let read: Vec<String> = webhook
-            .bare_fields()
-            .into_iter()
-            .map(variable_part)
-            .collect();
-        let mut holders: std::collections::BTreeMap<String, Vec<&String>> = Default::default();
-        let mut seen = std::collections::HashSet::new();
-        for cred_id in webhook
-            .credentials()
-            .iter()
-            .filter(|c| seen.insert(c.as_str()))
-        {
-            let Some(credential) = self.credentials.get(cred_id) else {
-                continue;
-            };
-            // A credential holding `token` and `TOKEN` is still one holder.
-            let mut fields: Vec<String> = credential
-                .declared_fields()
-                .iter()
-                .map(|f| variable_part(f))
-                .filter(|f| read.contains(f))
-                .collect();
-            fields.sort();
-            fields.dedup();
-            for field in fields {
-                holders.entry(field).or_default().push(cred_id);
-            }
-        }
-        holders
-            .into_iter()
-            .filter(|(_, ids)| ids.len() > 1)
-            .map(|(field, ids)| {
-                format!(
-                    "Webhook '{id}' uses credentials {} that all have a '{field}' field — a \
-                     webhook reads '{field}' by its bare name, which no credential keeps when \
-                     two share it; keep '{field}' in one of them",
-                    quoted(&ids)
-                )
-            })
-            .collect()
     }
 
     fn is_vault(&self, credential_id: &str) -> bool {
@@ -892,138 +799,20 @@ mod tests {
         "projects:\n  - name: prj-state\n    git_url: https://example.com/state.git\n";
     const CREDENTIAL: &str = "credentials:\n  - name: cred-key\n    type: token\n    env_prefix: JT\n    secret_keys:\n      token: KEY\n";
 
-    // Two credentials a webhook would deliver under one id are refused: each
-    // would overwrite the other's CREDENTIAL_<ID>_<FIELD> values.
-    #[test]
-    fn a_webhook_s_credentials_never_collide() {
-        let creds = "credentials:\n  - name: cred-vc-aa1\n    type: token\n    env_vars:\n      token: A\n  - name: cred_vc_aa1\n    type: token\n    env_vars:\n      url: B\n";
-        let dir = dir_with(&[
-            ("projects.yaml", PROJECT),
-            ("credentials.yaml", creds),
-            (
-                "webhooks/w.yaml",
-                "webhooks:\n  - name: w\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-state]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-vc-aa1, cred_vc_aa1]\n",
-            ),
-        ]);
-        let err = load_err(&dir);
-        assert!(
-            err.contains("Webhook 'w' uses credentials 'cred-vc-aa1', 'cred_vc_aa1' that are all delivered as CREDENTIAL_VC_AA1_*"),
-            "{err}"
-        );
-    }
-
-    // A credential listed twice is one credential: nothing collides.
-    #[test]
-    fn a_credential_listed_twice_does_not_collide_with_itself() {
-        let dir = dir_with(&[
-            ("projects.yaml", PROJECT),
-            ("credentials/cred-key.yaml", CREDENTIAL),
-            (
-                "webhooks/w.yaml",
-                "webhooks:\n  - name: w\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-state]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-key, cred-key]\n",
-            ),
-        ]);
-        load_config(dir.path().to_str().unwrap()).expect("loads");
-    }
-
-    // A webhook reads bare field names only, which two credentials sharing a
-    // field both lose: refused at load, naming the field and the credentials,
-    // where the configuration says which fields each has.
-    #[test]
-    fn a_webhook_s_credentials_must_not_share_a_field() {
-        let creds = "credentials:\n  - name: cred-auth\n    type: token\n    env_vars:\n      token: AUTH_TOKEN\n  - name: cred-sign\n    type: token\n    env_prefix: SIGN\n    secret_keys:\n      token: TOKEN\n      secret: SECRET\n  - name: cred-vaulted\n    type: token\n    vault: cred-vault\n    vault_path: team/x\n  - name: cred-vault\n    type: vault\n    address: https://vault.example.com\n    env_vars:\n      token: VAULT_TOKEN\n";
-        let dir = dir_with(&[
-            ("projects.yaml", PROJECT),
-            ("credentials.yaml", creds),
-            (
-                "webhooks/w.yaml",
-                "webhooks:\n  - name: w\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-state]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-auth, cred-sign]\n      sign: {}\n",
-            ),
-            // Whatever fields a whole Vault secret holds is not knowable at
-            // load: that one loads, and the send says what is shared.
-            (
-                "webhooks/v.yaml",
-                "webhooks:\n  - name: v\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-state]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-auth, cred-vaulted]\n",
-            ),
-        ]);
-        let err = load_err(&dir);
-        assert!(
-            err.contains(
-                "Webhook 'w' uses credentials 'cred-auth', 'cred-sign' that all have a 'token' field"
-            ),
-            "{err}"
-        );
-        assert!(!err.contains("'secret' field"), "{err}");
-        assert!(!err.contains("Webhook 'v'"), "{err}");
-    }
-
-    // Only the fields the webhook reads by bare name are checked, compared
-    // as the variable they become: a shared field it never reads loads, and
-    // `Token` beside `token` is the same field.
-    #[test]
-    fn a_webhook_s_shared_field_check_covers_only_what_it_reads() {
-        let creds = "credentials:\n  - name: cred-a\n    type: username_password\n    env_vars:\n      username: A_USER\n      token: A_TOKEN\n      url: A_URL\n  - name: cred-b\n    type: username_password\n    env_vars:\n      password: B_PASS\n      Token: B_TOKEN\n      url: B_URL\n";
-        let webhook = |name: &str, extra: &str| {
-            format!(
-                "webhooks:\n  - name: {name}\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-state]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-a, cred-b]\n{extra}"
-            )
-        };
-        let base = |file: &str, yaml: String| {
-            dir_with(&[
-                ("projects.yaml", PROJECT),
-                ("credentials.yaml", creds),
-                (file, &yaml),
-            ])
-        };
-
-        // Basic reads username and password, which only one of them has
-        // each: the shared `url` and `token`/`Token` are never read.
-        let dir = base(
-            "webhooks/basic.yaml",
-            webhook("basic", "      auth: basic\n"),
-        );
-        load_config(dir.path().to_str().unwrap()).expect("loads");
-
-        // Bearer reads `token`, which both have, one written `Token`.
-        let dir = base(
-            "webhooks/bearer.yaml",
-            webhook("bearer", "      auth: bearer\n"),
-        );
-        let err = load_err(&dir);
-        assert!(
-            err.contains(
-                "Webhook 'bearer' uses credentials 'cred-a', 'cred-b' that all have a 'token' field"
-            ),
-            "{err}"
-        );
-        assert!(!err.contains("'url' field"), "{err}");
-
-        // No auth reads no `token`; a signature reads its own field.
-        let dir = base(
-            "webhooks/signed.yaml",
-            webhook(
-                "signed",
-                "      auth: none\n      sign: {secret_field: url}\n",
-            ),
-        );
-        let err = load_err(&dir);
-        assert!(err.contains("all have a 'url' field"), "{err}");
-        assert!(!err.contains("'token' field"), "{err}");
-    }
-
     #[test]
     fn webhooks_load_as_items() {
         let dir = dir_with(&[
             ("projects.yaml", PROJECT),
             ("credentials/cred-key.yaml", CREDENTIAL),
             (
-                "webhooks/ntf-ascender-drift.yaml",
-                "webhooks:\n  - name: ntf-ascender-drift\n    type: ascender\n    events: [commit_pulled]\n    projects: [prj-state]\n    ascender:\n      url: https://ascender.example.com\n      job_template: 12\n      credentials: [cred-key]\n",
+                "webhooks/ntf-drift.yaml",
+                "webhooks:\n  - name: ntf-drift\n    project: prj-state\n    events: [commit_pulled]\n    credential: cred-key\n    webhook:\n      url: https://jobs.example.com/launch\n",
             ),
         ]);
         let cfg = load_config(dir.path().to_str().unwrap()).expect("loads");
-        let n = &cfg.webhooks["ntf-ascender-drift"];
-        assert_eq!(n.projects.named(), ["prj-state".to_string()]);
+        let n = &cfg.webhooks["ntf-drift"];
+        assert_eq!(n.project, "prj-state");
+        assert_eq!(n.credential.as_deref(), Some("cred-key"));
     }
 
     #[test]
@@ -1032,7 +821,7 @@ mod tests {
             ("projects.yaml", PROJECT),
             (
                 "webhooks/n.yaml",
-                "webhooks:\n  - name: n\n    type: webhook\n    events: [pull_failed]\n    projects: [prj-nope]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-nope]\n",
+                "webhooks:\n  - name: n\n    project: prj-nope\n    events: [pull_failed]\n    credential: cred-nope\n    webhook:\n      url: https://hooks.example.com/x\n      tls: {client_credential: cred-mtls-nope}\n",
             ),
         ]);
         let err = load_err(&dir);
@@ -1042,6 +831,10 @@ mod tests {
         );
         assert!(
             err.contains("Webhook 'n' references unknown credential 'cred-nope'"),
+            "{err}"
+        );
+        assert!(
+            err.contains("Webhook 'n' references unknown credential 'cred-mtls-nope'"),
             "{err}"
         );
     }
@@ -1131,7 +924,7 @@ mod tests {
             ),
             (
                 "w.yaml",
-                "webhooks:\n  - name: w\n    type: webhook\n    events: [pull_failed]\n    projects: [missing]\n    webhook:\n      url: https://hooks.example.com/x\n      credentials: [cred-y]\n",
+                "webhooks:\n  - name: w\n    project: missing\n    events: [pull_failed]\n    credential: cred-y\n    webhook:\n      url: https://hooks.example.com/x\n",
             ),
             (
                 "keys.yaml",
@@ -1330,7 +1123,7 @@ mod tests {
             ("projects.yaml", PROJECT),
             (
                 "webhooks/w.yaml",
-                "webhooks:\n  - name: w\n    type: ascender\n    events: [commit_pulled]\n    projects: [prj-state]\n    ascender:\n      url: https://ascender.example.com\n      job_template: 12\n      credentials: [cred-vault]\n",
+                "webhooks:\n  - name: w\n    project: prj-state\n    events: [commit_pulled]\n    credential: cred-vault\n    webhook:\n      url: https://jobs.example.com/launch\n",
             ),
             (
                 "creds.yaml",

@@ -116,7 +116,7 @@ pub async fn list_projects(
                     let mut ids: Vec<String> = config
                         .webhooks
                         .iter()
-                        .filter(|(_, w)| w.projects.includes(id))
+                        .filter(|(_, w)| &w.project == id)
                         .map(|(wid, _)| wid.clone())
                         .collect();
                     ids.sort();

@@ -108,9 +108,9 @@ pub async fn sync_project(
     let start = std::time::Instant::now();
     // Listing commits can take a fetch: only when someone will read them.
     let list_commits = announce.is_some_and(|a| {
-        a.webhooks
-            .values()
-            .any(|w| w.wants_project(Event::CommitPulled, project_id))
+        a.webhooks.values().any(|w| {
+            w.enabled && w.project == project_id && w.events.contains(&Event::CommitPulled)
+        })
     });
     let Pulled {
         result,
