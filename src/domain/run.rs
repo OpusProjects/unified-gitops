@@ -100,10 +100,12 @@ impl RunLog {
         format!("{}/{item}", kind.as_str())
     }
 
+    // The last real run: a dry run is in the history, but says nothing about
+    // how the item stands.
     pub fn last(&self, kind: Kind, item: &str) -> Option<Run> {
         self.runs
             .get(&Self::key(kind, item))
-            .and_then(|h| h.front().cloned())
+            .and_then(|h| h.iter().find(|r| !r.dry_run).cloned())
     }
 
     pub fn history(&self, kind: Kind, item: &str) -> Vec<Run> {
@@ -183,6 +185,11 @@ mod tests {
         assert_eq!(log.record(run(true, false)), Standing::Recovered);
         assert_eq!(log.record(run(true, false)), Standing::Unchanged);
         assert_eq!(log.history(Kind::Api, "a").len(), 5);
+        log.record(run(false, true));
+        assert!(
+            log.last(Kind::Api, "a").is_some_and(|r| r.ok),
+            "a dry run is not the last run"
+        );
         assert!(log.last(Kind::Script, "a").is_none());
         assert_eq!(Kind::Script.section(), "scripts");
     }
