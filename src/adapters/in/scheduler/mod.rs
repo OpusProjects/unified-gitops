@@ -5,7 +5,7 @@ use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
 use tracing::{debug, error, info};
 
 use crate::AppState;
-use crate::application::projects::{Announce, sync_project};
+use crate::application::projects::sync_project;
 use crate::domain::project::GitProject;
 use crate::domain::sync_health::SyncHealthRegistry;
 use crate::ports::git::GitPort;
@@ -173,11 +173,7 @@ async fn scheduled_project_pull(
         project_id,
         project,
         projects_dir,
-        Some(Announce {
-            dispatcher: &state.dispatcher,
-            webhooks: &config.webhooks,
-            url: config.url.as_deref(),
-        }),
+        Some(state.announce(&config)),
         crate::application::projects::RunOrigin::of(
             crate::domain::sync_health::RunTrigger::Scheduled,
         ),
@@ -199,6 +195,62 @@ async fn scheduled_project_pull(
             );
         }
     }
+}
+
+// One task per item with a cron `trigger.schedule`: a run at every
+// occurrence, of every file its trigger selects. A run still going when the
+// next occurrence comes holds that one back (one run per item at a time).
+pub fn start_item_schedules(
+    state: Arc<AppState>,
+    shutdown: watch::Receiver<bool>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    use crate::domain::run::Kind;
+    use crate::domain::trigger::On;
+    let config = state.config();
+    let mut scheduled: Vec<(Kind, String, String)> = config
+        .apis
+        .iter()
+        .filter(|(_, a)| a.enabled && a.trigger.fires_on(On::Schedule))
+        .filter_map(|(id, a)| Some((Kind::Api, id.clone(), a.trigger.schedule.clone()?)))
+        .collect();
+    scheduled.sort();
+    let mut handles = Vec::new();
+    for (kind, item, expression) in scheduled {
+        let Ok(cron) = parse_cron(&expression) else {
+            continue;
+        };
+        info!(item = %item, kind = kind.as_str(), schedule = %expression, "Item scheduled");
+        let state = Arc::clone(&state);
+        let task_shutdown = shutdown.clone();
+        handles.push(spawn_supervised(
+            format!("{}:{item}", kind.as_str()),
+            Duration::from_secs(60),
+            move || {
+                let state = Arc::clone(&state);
+                let item = item.clone();
+                let cron = cron.clone();
+                let mut shutdown = task_shutdown.clone();
+                async move {
+                    loop {
+                        let Some(delay) = next_cron_delay(&cron, chrono::Utc::now()) else {
+                            error!(item = %item, "Cron schedule has no future occurrence — item will NOT run");
+                            return;
+                        };
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {}
+                            _ = shutdown.changed() => return,
+                        }
+                        let config = state.config();
+                        let request = crate::application::actions::scheduled(kind, &item, On::Schedule);
+                        if let Err(e) = state.runner.run(&config, request).await {
+                            error!(item = %item, error = %e, "Scheduled run could not start");
+                        }
+                    }
+                }
+            },
+        ));
+    }
+    handles
 }
 
 // Every start_* function takes the shutdown receiver and returns the spawned
@@ -243,6 +295,7 @@ pub fn start_supervisor(
             let (stop, stop_rx) = watch::channel(false);
 
             let mut handles = start_project_tasks(Arc::clone(&state), stop_rx.clone());
+            handles.extend(start_item_schedules(Arc::clone(&state), stop_rx.clone()));
             // A project that arrived WITH this reload has no checkout yet, and
             // would have none until its first periodic pull — which for a
             // project without an interval is never. Boot already clones (main), so this is only
@@ -311,11 +364,7 @@ fn clone_missing_checkouts(state: Arc<AppState>) -> Vec<tokio::task::JoinHandle<
                 &project_id,
                 &project,
                 &state.projects_dir,
-                Some(Announce {
-                    dispatcher: &state.dispatcher,
-                    webhooks: &config.webhooks,
-                    url: config.url.as_deref(),
-                }),
+                Some(state.announce(&config)),
                 crate::application::projects::RunOrigin::of(
                     crate::domain::sync_health::RunTrigger::Startup,
                 ),

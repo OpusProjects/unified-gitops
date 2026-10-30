@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -8,7 +7,7 @@ use tokio::sync::RwLock;
 use crate::application::webhooks::{Dispatcher, PullEvent, PullOutcome, after_pull};
 use crate::domain::project::GitProject;
 use crate::domain::sync_health::{RunRecord, RunTrigger, SyncHealthRegistry};
-use crate::domain::webhook::{Event, Webhook};
+use crate::domain::webhook::Event;
 use crate::ports::git::{CommitRange, GitPort};
 use crate::ports::secrets::SecretsPort;
 use crate::ports::venv::{VenvOutcome, VenvPort};
@@ -56,9 +55,10 @@ pub fn checkout_lock(dir: &Path) -> Arc<RwLock<()>> {
 #[derive(Clone, Copy)]
 pub struct Announce<'a> {
     pub dispatcher: &'a Dispatcher,
-    pub webhooks: &'a HashMap<String, Webhook>,
-    // server.url, for a link to the project in the UI.
-    pub url: Option<&'a str>,
+    // What a commit starts (application::actions).
+    pub runner: &'a Arc<crate::application::actions::Runner>,
+    // The webhooks and items to tell, and server.url for links.
+    pub config: &'a Arc<crate::RuntimeConfig>,
 }
 
 // A pull that moved the checkout: from which commit, to which, and what came
@@ -106,11 +106,16 @@ pub async fn sync_project(
 ) -> Result<(), String> {
     let started_at = crate::domain::unix_now();
     let start = std::time::Instant::now();
-    // Listing commits can take a fetch: only when someone will read them.
+    // Listing commits can take a fetch: only when someone will read them, a
+    // webhook telling them or an item acting on the files they touched.
     let list_commits = announce.is_some_and(|a| {
-        a.webhooks.values().any(|w| {
+        a.config.webhooks.values().any(|w| {
             w.enabled && w.project == project_id && w.events.contains(&Event::CommitPulled)
-        })
+        }) || a
+            .config
+            .apis
+            .values()
+            .any(|i| i.enabled && i.project == project_id)
     });
     let Pulled {
         result,
@@ -148,11 +153,11 @@ pub async fn sync_project(
         let tell = |revision: Option<&str>, event: PullEvent<'_>| {
             after_pull(
                 announce.dispatcher,
-                announce.webhooks,
+                &announce.config.webhooks,
                 &PullOutcome {
                     project: project_id,
                     description: project.description.as_deref(),
-                    base_url: announce.url,
+                    base_url: announce.config.url.as_deref(),
                     revision,
                     event,
                 },
@@ -175,6 +180,12 @@ pub async fn sync_project(
                             from: &moved.from,
                             range: moved.range.as_ref(),
                         },
+                    );
+                    announce.runner.after_commit(
+                        announce.config,
+                        project_id,
+                        &moved.from,
+                        moved.range.as_ref().and_then(|r| r.paths.as_deref()),
                     );
                 }
             }

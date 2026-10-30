@@ -25,6 +25,8 @@ pub struct RuntimeConfig {
     pub credentials: HashMap<String, Credential>,
     // Read after every pull, so they reload like projects.
     pub webhooks: HashMap<String, Webhook>,
+    // Read per run, so they reload like webhooks.
+    pub apis: HashMap<String, crate::domain::api::Api>,
     // Carried for the same reason as `credentials`: the chain is rebuilt from
     // it on every reload.
     pub secrets: crate::config::SecretsConfig,
@@ -150,6 +152,8 @@ pub struct AppState {
     pub dispatcher: Arc<crate::application::webhooks::Dispatcher>,
     // What sends it: an HTTP client in production, a recorder in tests.
     pub http: Arc<dyn ports::http_sender::HttpSenderPort>,
+    // Runs the items that act on a change (application::actions).
+    pub runner: Arc<crate::application::actions::Runner>,
 }
 
 impl AppState {
@@ -200,5 +204,24 @@ impl AppState {
     pub fn start_webhooks(&self) {
         self.dispatcher
             .start(Arc::clone(&self.secrets), Arc::clone(&self.http));
+        self.runner.start(crate::application::actions::Ports {
+            secrets: Arc::clone(&self.secrets),
+            http: Arc::clone(&self.http),
+            git: Arc::clone(&self.git),
+            dispatcher: Arc::clone(&self.dispatcher),
+            projects_dir: self.projects_dir.clone(),
+        });
+    }
+
+    // What a pull tells, and to whom: the configuration of this moment.
+    pub fn announce<'a>(
+        &'a self,
+        config: &'a Arc<RuntimeConfig>,
+    ) -> crate::application::projects::Announce<'a> {
+        crate::application::projects::Announce {
+            dispatcher: &self.dispatcher,
+            runner: &self.runner,
+            config,
+        }
     }
 }

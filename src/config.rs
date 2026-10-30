@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+use crate::domain::api::Api;
 use crate::domain::api_key::{ApiKeyDef, ApiKeyRole};
 use crate::domain::credential::{Credential, CredentialRules};
 use crate::domain::project::GitProject;
@@ -21,6 +22,7 @@ pub struct AppConfig {
     pub projects: HashMap<String, GitProject>,
     pub api_keys: HashMap<String, ApiKeyDef>,
     pub webhooks: HashMap<String, Webhook>,
+    pub apis: HashMap<String, Api>,
 }
 
 fn vault_as_login(who: &str, credential_id: &str) -> String {
@@ -140,7 +142,7 @@ pub struct ConfigApiConfig {
 // API and the state directory use.
 
 // The top-level keys an item file may use.
-pub const SECTIONS: [&str; 4] = ["projects", "credentials", "api_keys", "webhooks"];
+pub const SECTIONS: [&str; 5] = ["projects", "credentials", "api_keys", "webhooks", "apis"];
 
 // The settings a running process cannot adopt without being restarted, pulled
 // out of AppConfig as plain comparable values.
@@ -379,6 +381,27 @@ impl AppConfig {
             }
         }
 
+        // APIs: their own settings, then the project they watch and the
+        // credentials they call with.
+        for (id, api) in &self.apis {
+            errors.extend(api.errors(id, |expression| {
+                crate::adapters::r#in::scheduler::parse_cron(expression).map(|_| ())
+            }));
+            if !self.projects.contains_key(&api.project) {
+                errors.push(format!(
+                    "API '{id}' references unknown project '{}'",
+                    api.project
+                ));
+            }
+            for cred in api.credentials() {
+                if !self.credentials.contains_key(cred) {
+                    errors.push(format!("API '{id}' references unknown credential '{cred}'"));
+                } else if self.is_vault(cred) {
+                    errors.push(vault_as_login(&format!("API '{id}'"), cred));
+                }
+            }
+        }
+
         // The deprecated config.yaml Vault: a 0 bound fails every request.
         if self
             .secrets_config
@@ -600,16 +623,18 @@ pub fn load_config_detailed(dir: &Path) -> Result<AppConfig, ConfigErrors> {
         }
     }
     let mut section = |name: &str| entries.remove(name).unwrap_or_default();
-    let (c, pr, ak, nt) = (
+    let (c, pr, ak, nt, ap) = (
         section("credentials"),
         section("projects"),
         section("api_keys"),
         section("webhooks"),
+        section("apis"),
     );
     let credentials = take("credential", c, &mut errors);
     let projects = take("project", pr, &mut errors);
     let api_keys = take("API key", ak, &mut errors);
     let webhooks = take("webhook", nt, &mut errors);
+    let apis = take("API", ap, &mut errors);
     if !errors.is_empty() {
         // Cross-references are only worth checking once every item parsed:
         // otherwise one typo'd credential also reports every project using it.
@@ -625,6 +650,7 @@ pub fn load_config_detailed(dir: &Path) -> Result<AppConfig, ConfigErrors> {
         projects,
         api_keys,
         webhooks,
+        apis,
     };
 
     let errors = config.validate_errors();
@@ -910,6 +936,32 @@ mod tests {
             "typo.yaml: unknown key 'projetcs'",
             "nameless.yaml: projects item 1 needs a 'name'",
             "bad field.yaml: rename it",
+        ] {
+            assert!(err.contains(expected), "missing {expected:?} in {err}");
+        }
+    }
+
+    #[test]
+    fn apis_load_as_items_and_name_what_they_reference() {
+        let dir = dir_with(&[
+            ("projects.yaml", PROJECT),
+            ("credentials/cred-key.yaml", CREDENTIAL),
+            (
+                "apis/users.yaml",
+                "apis:\n  - name: users\n    project: prj-state\n    credential: cred-key\n    trigger: {paths: [users/*.json], on: [change, schedule], schedule: '0 3 * * *'}\n    api:\n      url: https://x/users/$file.stem\n",
+            ),
+        ]);
+        let cfg = load_config(dir.path().to_str().unwrap()).expect("loads");
+        assert_eq!(cfg.apis["users"].project, "prj-state");
+        let dir = dir_with(&[(
+            "apis.yaml",
+            "apis:\n  - name: a\n    project: nope\n    credential: cred-x\n    trigger: {on: [schedule], schedule: 'every day'}\n    api:\n      url: https://x\n",
+        )]);
+        let err = load_err(&dir);
+        for expected in [
+            "API 'a' references unknown project 'nope'",
+            "API 'a' references unknown credential 'cred-x'",
+            "API 'a': trigger.schedule 'every day' is not a cron schedule",
         ] {
             assert!(err.contains(expected), "missing {expected:?} in {err}");
         }

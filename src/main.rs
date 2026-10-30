@@ -226,11 +226,7 @@ async fn main() {
                             &project_id,
                             &project,
                             &projects_dir,
-                            Some(unified_gitops::application::projects::Announce {
-                                dispatcher: &state.dispatcher,
-                                webhooks: &config.webhooks,
-                                url: config.url.as_deref(),
-                            }),
+                            Some(state.announce(&config)),
                             unified_gitops::application::projects::RunOrigin::of(
                                 unified_gitops::domain::sync_health::RunTrigger::Startup,
                             ),
@@ -262,6 +258,12 @@ async fn main() {
                 }
             }
 
+            if *boot_shutdown.borrow() {
+                return;
+            }
+            // The items that run at startup, now that their checkouts are
+            // there.
+            state.runner.at_startup(&state.config());
             if *boot_shutdown.borrow() {
                 return;
             }

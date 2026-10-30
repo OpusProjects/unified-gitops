@@ -46,6 +46,117 @@ impl PathFilter {
     }
 }
 
+// What starts a run of an item that acts (an API call, a script): a change
+// to the files it watches, the process starting, a cron schedule, or a
+// person (the API). `paths` and `ignore_paths` are a PathFilter's.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Trigger {
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub ignore_paths: Vec<String>,
+    #[serde(default = "default_on")]
+    pub on: Vec<On>,
+    // Cron, five or six fields, when `on` has `schedule`.
+    #[serde(default)]
+    pub schedule: Option<String>,
+    // Wait this long after a change, and take the changes that arrive in the
+    // meantime into the same run. 0: run at once.
+    #[serde(default)]
+    pub debounce_seconds: u64,
+}
+
+impl Default for Trigger {
+    fn default() -> Self {
+        Self {
+            paths: Vec::new(),
+            ignore_paths: Vec::new(),
+            on: default_on(),
+            schedule: None,
+            debounce_seconds: 0,
+        }
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, serde::Serialize, utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum On {
+    // A pull brought commits touching the files it watches.
+    Change,
+    // The process started (its first pull done).
+    Startup,
+    // Its cron `schedule`.
+    Schedule,
+    // Someone asked: POST /api/v1/<section>/<name>/run.
+    Manual,
+}
+
+impl On {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            On::Change => "change",
+            On::Startup => "startup",
+            On::Schedule => "schedule",
+            On::Manual => "manual",
+        }
+    }
+}
+
+fn default_on() -> Vec<On> {
+    vec![On::Change, On::Manual]
+}
+
+// The longest a debounce may hold a change back.
+const MAX_DEBOUNCE_SECONDS: u64 = 3600;
+
+impl Trigger {
+    pub fn filter(&self) -> PathFilter {
+        PathFilter {
+            paths: self.paths.clone(),
+            ignore_paths: self.ignore_paths.clone(),
+        }
+    }
+
+    pub fn fires_on(&self, on: On) -> bool {
+        self.on.contains(&on)
+    }
+
+    // `parse_cron` checks a schedule's syntax; it is the scheduler's.
+    pub fn errors(&self, parse_cron: impl Fn(&str) -> Result<(), String>) -> Vec<String> {
+        let mut errors = self.filter().errors("trigger");
+        if self.on.is_empty() {
+            errors.push(
+                "trigger.on is empty: nothing would ever run it (change, startup, schedule, manual)"
+                    .to_string(),
+            );
+        }
+        match (&self.schedule, self.fires_on(On::Schedule)) {
+            (Some(expression), true) => {
+                if let Err(e) = parse_cron(expression) {
+                    errors.push(format!(
+                        "trigger.schedule '{expression}' is not a cron schedule: {e}"
+                    ));
+                }
+            }
+            (None, true) => {
+                errors.push("trigger.on has schedule but trigger.schedule is not set".to_string())
+            }
+            (Some(_), false) => errors
+                .push("trigger.schedule is set but trigger.on does not list schedule".to_string()),
+            (None, false) => {}
+        }
+        if self.debounce_seconds > MAX_DEBOUNCE_SECONDS {
+            errors.push(format!(
+                "trigger.debounce_seconds must be at most {MAX_DEBOUNCE_SECONDS}"
+            ));
+        }
+        errors
+    }
+}
+
 fn pattern_error(pattern: &str) -> Option<&'static str> {
     if pattern.trim().is_empty() {
         Some("is empty")
@@ -126,6 +237,34 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert_eq!(filter.select(&changed), [&changed[0]]);
+    }
+
+    #[test]
+    fn a_trigger_runs_on_changes_and_by_hand_unless_it_says_otherwise() {
+        let t = Trigger::default();
+        assert!(t.fires_on(On::Change) && t.fires_on(On::Manual) && !t.fires_on(On::Startup));
+        let ok = |_: &str| Ok(());
+        assert!(t.errors(ok).is_empty());
+        let t: Trigger = serde_saphyr::from_str(
+            "on: [schedule]\nschedule: '0 * * * *'\ndebounce_seconds: 7200\n",
+        )
+        .unwrap();
+        let e = t.errors(|_| Err("bad".to_string())).join("\n");
+        assert!(e.contains("not a cron schedule: bad"), "{e}");
+        assert!(e.contains("debounce_seconds"), "{e}");
+        let t: Trigger = serde_saphyr::from_str("on: [schedule]\n").unwrap();
+        assert!(
+            t.errors(ok)
+                .join("")
+                .contains("trigger.schedule is not set")
+        );
+        let t: Trigger = serde_saphyr::from_str("on: []\nschedule: x\n").unwrap();
+        let e = t.errors(ok).join("\n");
+        assert!(
+            e.contains("trigger.on is empty") && e.contains("does not list schedule"),
+            "{e}"
+        );
+        assert!(serde_saphyr::from_str::<Trigger>("on: [push]\n").is_err());
     }
 
     #[test]
