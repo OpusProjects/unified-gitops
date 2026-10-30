@@ -126,11 +126,14 @@ The web layer comes the same way from [web](https://github.com/OpusProjects/web)
 `Permissions`), the route help the browsable pages read from the OpenAPI document (`http::spec`), and the
 config API: the store (`FsConfigStore`, built with this service's loader by `fs_store`), the file rules
 and every config route's logic. `http/config.rs` keeps the route functions, `ConfigSummary`,
-`ReloadInfo` and a `ConfigHost` (what a reload does). Move to a new release with
+`ReloadInfo` and a `ConfigHost` (what a reload does). The browsable pages and the sign-in form come
+from it too: `http::html::site()` is this service's `Site`, and `http/login.rs` keeps the route
+functions and a `SignIn` that runs the LDAP login and maps its `Grant`. The Users page (`http/users.rs`)
+stays here, its fields being this service's scopes. Move to a new release with
 `cargo update -p web-rs` in a `build:` PR.
 
-Project pulls, process env, scheduler basics, metrics plumbing and the
-browsable pages are still the same code as unified-api's, copied: fix a bug in one, check the other.
+Project pulls, process env, scheduler basics, metrics plumbing and the Users page are still the
+same code as unified-api's, copied: fix a bug in one, check the other.
 
 ## Releasing
 
