@@ -8,22 +8,22 @@ use crate::adapters::r#in::http::error::ApiError;
 use crate::adapters::r#in::http::session::COOKIE_NAME;
 
 // API keys, the middleware that checks them and the browser sessions behind
-// it come from unified-auth, shared with unified-api; what stays here is what
+// it come from auth-rs, shared with unified-api; what stays here is what
 // only this service has: what a key may touch (Permissions), how
 // api_keys.yaml becomes keys, and the error shape a refusal renders in.
 //
 // The shared types are generic over the permissions type. These aliases fix
 // it to ours, so the rest of the service names them as before.
-pub use unified_auth::http::{AuthMethod, BrowserIdentity, match_token, presented_token};
+pub use auth_rs::http::{AuthMethod, BrowserIdentity, match_token, presented_token};
 
 // A configured key with its secret already resolved from the environment
 // (main.rs does the resolution at the boundary; nothing here touches env vars).
 // Its `id` and its `name` are both the key's `name` in the api_keys item: an
 // api key here has no separate label.
-pub type ResolvedApiKey = unified_auth::http::ResolvedApiKey<Permissions>;
-pub type ApiKeyRegistry = unified_auth::http::ApiKeyRegistry<Permissions>;
-pub type ApiKeys = unified_auth::http::ApiKeys<Permissions>;
-pub type AuthContext = unified_auth::http::AuthContext<Permissions>;
+pub type ResolvedApiKey = auth_rs::http::ResolvedApiKey<Permissions>;
+pub type ApiKeyRegistry = auth_rs::http::ApiKeyRegistry<Permissions>;
+pub type ApiKeys = auth_rs::http::ApiKeys<Permissions>;
+pub type AuthContext = auth_rs::http::AuthContext<Permissions>;
 
 // What a caller is allowed to touch. Admin sees everything; Scoped only the
 // listed ids. HashSet instead of Vec: `contains` is O(1) and the lists are
@@ -35,7 +35,7 @@ pub enum Permissions {
 }
 
 // What an instance with no API keys grants every caller.
-impl unified_auth::http::Permission for Permissions {
+impl auth_rs::http::Permission for Permissions {
     fn admin() -> Self {
         Permissions::Admin
     }
@@ -144,13 +144,13 @@ pub fn ldap_requires_keys(
     Ok(())
 }
 
-// Every request through the API, authenticated by unified-auth's middleware:
+// Every request through the API, authenticated by auth-rs's middleware:
 // a key in a header, a browser session, or — with no keys configured — every
 // caller as admin. This wrapper passes it our session cookie and renders a
 // refusal as an ApiError, so a 401 carries the {"error": ...} body every other
 // failure in the API carries.
 pub async fn require_api_key(request: Request, next: Next) -> Result<Response, ApiError> {
-    unified_auth::http::require_api_key::<Permissions>(COOKIE_NAME, request, next)
+    auth_rs::http::require_api_key::<Permissions>(COOKIE_NAME, request, next)
         .await
         .map_err(ApiError::from)
 }

@@ -146,8 +146,8 @@ fn default_state_dir() -> String {
 }
 
 // Secrets behavior — config.yaml, `secrets:` section (optional, deprecated).
-// The struct lives with the chain it configures, in unified-secrets.
-pub use unified_secrets::SecretsConfig;
+// The struct lives with the chain it configures, in secrets-rs.
+pub use secrets_rs::SecretsConfig;
 
 // Where git projects are cloned — config.yaml, `projects:` section (optional)
 #[derive(Deserialize)]

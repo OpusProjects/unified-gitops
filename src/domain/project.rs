@@ -116,13 +116,13 @@ fn default_branch() -> String {
 }
 
 // Credentials written into an address, kept out of what is shown and logged:
-// from unified-git, which also applies them to its own errors.
-pub use unified_git::{redact_userinfo, without_userinfo};
+// from git-rs, which also applies them to its own errors.
+pub use git_rs::{redact_userinfo, without_userinfo};
 
 impl GitProject {
     // The part of the project git needs: where to pull from, and which branch.
-    pub fn remote(&self) -> unified_git::Remote {
-        unified_git::Remote {
+    pub fn remote(&self) -> git_rs::Remote {
+        git_rs::Remote {
             url: self.git_url.clone(),
             branch: self.branch.clone(),
         }
