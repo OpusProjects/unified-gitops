@@ -10,19 +10,17 @@ session also need its `X-CSRF-Token`). Every failure is `{"error": "..."}`.
 | Route                                 | Method | Who                  | What                                               |
 | ------------------------------------- | ------ | -------------------- | -------------------------------------------------- |
 | `/api/v1/`                            | GET    | any key              | Every collection this key may read                 |
-| `/api/v1/applications`                | GET    | any key (its apps)   | Applications with status, commit, pending counts   |
-| `/api/v1/applications/{id}`           | GET    | key granted the app  | The same, plus the pending plan and run history    |
-| `/api/v1/applications/{id}/refresh`   | POST   | key granted the app  | Compare now; change nothing                        |
-| `/api/v1/applications/{id}/sync`      | POST   | key granted the app  | Compare, then apply every operation found          |
-| `/api/v1/applications/{id}/rollback`  | POST   | key granted the app  | Apply an older commit's desired state; pause auto-sync |
-| `/api/v1/applications/{id}/state/{kind}` | GET | key granted the app  | The system's current settings, as of its last check |
-| `/api/v1/search?q=`                   | GET    | any key (its apps)   | Find an object by key or value: its application, kind, whether git declares it |
-| `/api/v1/connectors`                     | GET    | admin                | Connectors: script, project, timeout, who uses them |
-| `/api/v1/webhooks`               | GET    | admin                | Webhooks: events, destination, last send      |
-| `/api/v1/webhooks/{id}`          | GET    | admin                | One webhook and its last 50 sends             |
-| `/api/v1/webhooks/{id}/test`     | POST   | admin                | Send a test message now, once; answers the outcome |
-| `/api/v1/projects`                    | GET    | admin                | Git checkouts, their health, what uses them        |
-| `/api/v1/projects/{id}/sync`          | POST   | admin                | Pull a project now                                 |
+| `/api/v1/apis`                        | GET    | any key (its projects) | API items: what they watch, where they send, last run |
+| `/api/v1/apis/{id}`                   | GET    | key granted its project | One API item and its last 50 runs               |
+| `/api/v1/apis/{id}/run`               | POST   | key granted its project | Run it now over every selected file; `?dry_run=true` writes nothing |
+| `/api/v1/scripts`                     | GET    | any key (its projects) | Script items: what they watch, what they run, last run |
+| `/api/v1/scripts/{id}`                | GET    | key granted its project | One script item and its last 50 runs, with output |
+| `/api/v1/scripts/{id}/run`            | POST   | key granted its project | Run it now; `?dry_run=true` runs nothing and says what would run |
+| `/api/v1/webhooks`                    | GET    | admin                | Webhooks: project, events, destination, last send  |
+| `/api/v1/webhooks/{id}`               | GET    | admin                | One webhook and its last 50 sends                  |
+| `/api/v1/webhooks/{id}/test`          | POST   | admin                | Send a test message now, once; answers the outcome |
+| `/api/v1/projects`                    | GET    | any key (its projects) | Git checkouts, their health, what uses them      |
+| `/api/v1/projects/{id}/sync`          | POST   | key granted it       | Pull a project now: what a pipeline calls after pushing |
 | `/api/v1/credentials`                 | GET    | admin                | Credentials: where from, whether they resolve      |
 | `/api/v1/settings`                    | GET    | admin                | The configuration in force, defaults included      |
 | `/api/v1/auth`                        | GET    | any key              | Who the caller is; for admin, every way in         |
@@ -30,43 +28,49 @@ session also need its `X-CSRF-Token`). Every failure is `{"error": "..."}`.
 | `/healthz`, `/readyz`                 | GET    | public               | Probes                                             |
 | `/metrics`                            | GET    | public (or key)      | Prometheus exposition                              |
 
+A restricted key (or LDAP rule) names `projects`: it sees and pulls those, and sees and runs
+their APIs and scripts; another project's read as absent (404).
+
 ## Examples
 
 ```bash
 H="X-API-Key: $GITOPS_KEY"
 
-# What is out of sync, everywhere
-curl -s -H "$H" localhost:8183/api/v1/applications | jq '.[] | {name, status, pending_operations}'
+# A pipeline, after pushing: pull now, so the commit is acted on at once
+curl -s -X POST -H "$H" localhost:8183/api/v1/projects/infra/sync | jq '{success, error}'
 
-# What a sync of one application would do, field by field
-curl -s -X POST -H "$H" localhost:8183/api/v1/applications/isilon-prod/refresh | jq .result
-curl -s -H "$H" localhost:8183/api/v1/applications/isilon-prod | jq '.plan.operations'
+# What a run of an API would send, without sending it
+curl -s -X POST -H "$H" "localhost:8183/api/v1/apis/portainer-users/run?dry_run=true" \
+  | jq '.steps[] | {file, action, method, url, body}'
 
-# Apply it
-curl -s -X POST -H "$H" localhost:8183/api/v1/applications/isilon-prod/sync | jq '{result, applied}'
+# How the last runs of a script went
+curl -s -H "$H" localhost:8183/api/v1/scripts/reload-dns \
+  | jq '.history[] | {trigger, revision, ok, steps: [.steps[] | {file, exit_code, error}]}'
 
-# What the Isilon has now, in desired-state format
-curl -s -H "$H" localhost:8183/api/v1/applications/isilon-prod/state/nfs_export | jq .items
+# Run it now
+curl -s -X POST -H "$H" localhost:8183/api/v1/scripts/reload-dns/run | jq '{ok, error}'
 ```
 
 ## The run record
 
-`refresh` and `sync` answer with the run they made, which is also the newest entry in the
-application's `history`:
+A run endpoint answers with the run it made, which is also the newest entry in the item's
+`history`:
 
 ```json
 {
-  "id": 7, "trigger": "manual", "mode": "apply", "result": "partial",
-  "started_at": 1793001234, "finished_at": 1793001236,
-  "revision": "6e488a7…", "planned": 3,
-  "applied": [
-    {"kind": "nfs_export", "key": "/ifs/a", "op": "create", "ok": true},
-    {"kind": "nfs_export", "key": "/ifs/b", "op": "update", "ok": false,
-     "error": "… exit code Some(1): 403 Forbidden"}
-  ],
-  "errors": ["update nfs_export '/ifs/b': … 403 Forbidden"]
+  "item": "portainer-users", "kind": "api", "project": "infra",
+  "trigger": "manual", "by": "key-pipeline", "dry_run": false,
+  "revision": "6e488a7…", "script_revision": null,
+  "started_at": 1793001234, "duration_ms": 812, "ok": false, "error": null,
+  "steps": [
+    {"file": "users/admin.json", "action": "skip", "ok": true, "attempts": 0},
+    {"file": "users/jane.json", "action": "update", "method": "PUT",
+     "url": "https://portainer.example.com/api/users/jane", "status": 400, "ok": false,
+     "attempts": 1, "changed_fields": ["Role"], "error": "HTTP 400: …"}
+  ]
 }
 ```
 
-A plan operation (`plan.operations[]`) has `kind`, `key`, `op`, the `object` the connector
-will receive, and for an update the `changes`: `[{"field": "read_only", "from": false, "to": true}]`.
+A script's steps have `action: run`, its `exit_code` and `output` (the end of it) instead of a
+method and a URL. A dry run's steps carry the `body` an API would send, or the command a script
+would run.

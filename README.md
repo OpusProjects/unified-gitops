@@ -4,34 +4,66 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange.svg?logo=rust)](https://www.rust-lang.org/)
 
-GitOps for anything with an API: declare state in YAML, reconcile it through pluggable scripts.
+Git-triggered ops automation inside your network: when a repository changes, call APIs, run
+scripts and tell webhooks.
 
-Unified GitOps pulls desired state from git, compares it with what each live system has, and applies
-the difference, the way Argo CD does for Kubernetes. The systems are anything a script can talk to:
-an Isilon's NFS exports, Ascender job templates, vCenter virtual machines, InfiniBox volumes.
+Unified GitOps watches git repositories from inside your network. When a commit lands, it calls
+the APIs that should hear about it, with the files that changed as their bodies; it runs scripts
+from a repository, with what changed in their environment; and it tells webhooks what happened.
+Nothing has to reach in, no CI runner has to be registered, and every item is a YAML file in a
+configuration directory.
 
-Changes no longer wait in a queue of CI runners: a commit is picked up at the next check, inside your
-network, and a change made by hand on a system shows up as drift.
+```yaml
+apis:
+  - name: portainer-users
+    project: infra                      # the watched repository
+    trigger: {paths: [portainer/users/*.json]}
+    credential: cred-portainer
+    api:
+      url: https://portainer.example.com/api/users/$file.stem
+      method: PUT
+      compare: {ignore_fields: [Id]}    # skip what is already there
+      on_delete: {method: DELETE}
+
+scripts:
+  - name: reload-dns
+    project: infra
+    trigger: {paths: [dns/**]}
+    script:
+      project: ops-scripts              # the file can live in another repository
+      file: reload-dns.sh
+      args: [--zone, example.com]
+
+webhooks:
+  - name: notify
+    project: infra
+    events: [commit_pulled, api_failed, script_failed]
+    webhook:
+      url: https://hooks.example.com/services/x
+      body: {text: "$event.project: $event.event at $event.revision_short"}
+```
 
 ---
 
 ## ✨ Features
 
-- **Pull, not push**: projects are pulled from git before every check; no CI runner on the path
-- **Dumb connectors, smart core**: a connector lists objects and applies one operation; the core diffs
-- **Compares only what git declares**: the 40 default fields an API returns never look like drift
-- **Drift detection**: every check lists the live system, so a hand edit shows up as out of sync
-- **A local copy of each system's settings**: one YAML file per application and kind, git's format
-- **Plan before apply**: refresh shows what a sync would do, field by field, and changes nothing
-- **Safe by default**: no automatic sync, no deletes (prune) unless an application asks for them
-- **Self-describing connectors**: a script says what it manages, each type's key and what goes first
-- **One application, one system**: its address and credentials live in config, never in git
-- **Run history**: which commit was applied, when, and the result of every operation
-- **Webhooks**: drift, applied commits and failures to a webhook or an Ascender or AWX job
-- **Config as code**: one item per file, any folders; `name` is the identity
-- **Strict validation**: a typo in desired state or config fails before any system is touched
-- **Web UI and LDAP sign-in**: the same UI family and sign-in as unified-api, on its own address
-- **Secrets from Vault or env**, metrics for Prometheus, live config reload, single binary
+- **Pull, not push**: repositories are pulled on an interval, a cron schedule or on demand
+- **Acts on what changed**: each item names the files it watches; a commit runs only the items it
+  touched, with only those files
+- **APIs**: one request per changed file (its contents as the body) or per commit; upsert, compare
+  before writing, delete when a file is removed, order, dry run
+- **Scripts**: from the watched repository or another; arguments, environment, stdin, exit codes,
+  timeouts that stop the whole process group, output kept
+- **Webhooks**: any HTTP receiver, the body shaped by a template; pulls, API runs and script runs
+  as events
+- **Every common request option**: bearer, basic, header, query, OAuth 2.0 client credentials,
+  login flows; HMAC signatures; retries with Retry-After; TLS with your own CA or a client
+  certificate; proxies; rate limits; following a job until it finishes
+- **Triggers**: on a change, at startup, on a cron schedule or by hand, with a debounce
+- **Run history**: every run, its commit and each step's outcome, in the API and the UI
+- **Config as code**: one item per file, any folders; every template and setting checked at load
+- **Web UI and LDAP sign-in**, API keys scoped by project, secrets from Vault or the environment,
+  Prometheus metrics, live config reload, single binary
 
 ---
 
@@ -39,10 +71,12 @@ network, and a change made by hand on a system shows up as drift.
 
 | Document                                  | What it covers                                                         |
 | ----------------------------------------- | ---------------------------------------------------------------------- |
-| [How it works](docs/how-it-works.md)      | The reconcile loop: pull, list, diff, apply, and what each status means |
-| [Connectors](docs/connectors.md)                | The script contract, the Python SDK, and writing a connector               |
-| [Configuration](docs/configuration.md)    | Every YAML file field by field, and desired-state files                 |
-| [Webhooks](docs/webhooks.md)    | Drift, syncs and failures to a webhook or an Ascender or AWX job template |
+| [How it works](docs/how-it-works.md)      | Pulls, changed files, triggers, runs and events                         |
+| [APIs](docs/apis.md)                      | Calling an API with what changed: per file or commit, upsert, compare   |
+| [Scripts](docs/scripts.md)                | Running a script on a change: its file, arguments and environment       |
+| [Webhooks](docs/webhooks.md)              | Telling a receiver what happened: events, the message, body templates   |
+| [HTTP requests](docs/http-requests.md)    | The request settings APIs and webhooks share: auth, signing, TLS, retry |
+| [Configuration](docs/configuration.md)    | Every YAML file field by field                                          |
 | [API](docs/api.md)                        | All routes with authentication and examples                            |
 | [Architecture](docs/architecture.md)      | The layers, the dependency rule, and what is shared with unified-api   |
 | [Configuration API](docs/config-api.md)   | Pushing the config directory over HTTP and reloading it live            |

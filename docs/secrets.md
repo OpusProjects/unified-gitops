@@ -60,44 +60,29 @@ The older form, `env_prefix` + `secret_keys` (prefix joined to each value with
 
 ---
 
-## What scripts receive
+## What items receive
 
-A connector sees only the credentials its application declares, and nothing
-else: the child environment is scrubbed, so no script can read the API keys or
-another application's values. Each field arrives twice:
+Each API, script and webhook names one `credential`, resolved at every run or send.
 
-- `CREDENTIAL_<ID>_<FIELD>`, always. `<ID>` is the credential's name without a
-  leading `cred-`/`cred_`, anything outside `a-z0-9` made `_`: the `password`
-  of `cred-portainer-ldap` is `CREDENTIAL_PORTAINER_LDAP_PASSWORD`.
-- `CREDENTIAL_<FIELD>`, only when no other declared credential has that field
-  (compared as the variable it becomes: `TOKEN` and `token` are one field).
-  Two credentials with a `password` deliver neither as `CREDENTIAL_PASSWORD`,
-  rather than one silently overwriting the other.
+- **A script** receives each field as `CREDENTIAL_<FIELD>`, upper case, anything outside `A-Z0-9`
+  made `_`: the `password` of its credential is `CREDENTIAL_PASSWORD`, a `file_keys` entry
+  `ssh_key: /run/secrets/id_rsa` is `CREDENTIAL_SSH_KEY_PATH`. The child environment is scrubbed,
+  so no script can read the API keys or another item's values. See [scripts](scripts.md).
+- **An API or a webhook** reads the fields its `auth` and `signature` name (`token`, `username`
+  and `password`, `client_id` and `client_secret`, `secret`, or what a login body names), and a
+  `tls.client_credential`'s `cert` and `key`. See [HTTP requests](http-requests.md).
 
-A field no other credential has and already named after its own
-(`portainer_url` on `cred-portainer`) is not prefixed twice, so configurations
-written that way by hand deliver exactly what they did. If two values would
-still reach one variable (`cred-avamar`'s `aa1_url` and `cred-avamar-aa1`'s
-`url`), the run fails naming both, rather than one silently winning.
-
-An application's credentials must not be delivered under one id
-(`cred-vc-aa1` and `cred_vc_aa1` both become `CREDENTIAL_VC_AA1_*`): that is
-refused at load, and so is the same on a webhook.
-
-`env_vars: {username: D42_USERNAME}` on `cred-d42` reads `D42_USERNAME` and
-delivers `CREDENTIAL_D42_USERNAME` (and `CREDENTIAL_USERNAME` when it is the
-only one); a `file_keys` entry `ssh_key: /run/secrets/id_rsa` delivers
-`CREDENTIAL_SSH_KEY_PATH`. Git checkouts consume the same shapes
-(`username`, `ssh_key_path`, `token`) and never put a secret on a command
-line. See [connectors](connectors.md) for the full script environment.
+`env_vars: {username: D42_USERNAME}` reads `D42_USERNAME` and delivers its value as the field
+`username`. Git checkouts consume the same shapes (`username`, `ssh_key_path`, `token`) and never
+put a secret on a command line.
 
 ---
 
 ## The resolution cache and rotation
 
-Resolution runs on every check of every application. Against env vars that is
+Resolution runs on every run and every send. Against env vars that is
 free, and a file is a small local read, so those are read fresh every time: a
-rotated mounted file is seen on the next check. Against Vault it would be a
+rotated mounted file is seen on the next run. Against Vault it would be a
 request storm, so each Vault credential reuses what it read for its own
 `cache_ttl_seconds` (default 60; `0` disables).
 
@@ -162,13 +147,15 @@ credential that is not one, fails validation at startup. The old
 
 ## Failure semantics
 
-A credential that fails to resolve **fails that application's run,
-naming the credential** — never a silent skip that would let a connector run
-half-authenticated and fail later with a confusing error.
+A credential that fails to resolve **fails that run or send, naming the
+credential** — never a silent skip that would let a request go out
+half-authenticated and fail later with a confusing error. Nothing is sent and
+no script starts.
 
-The failure lands in the application's run errors and `sync_health` (and its
-Prometheus gauges), the failing task backs off, and — because errors are not
-cached — the next attempt re-asks the backend.
+The failure lands in the item's run error (or the webhook's send), is told to
+webhooks like any failed run, and — because errors are not cached — the next
+attempt re-asks the backend. A project whose credential fails to resolve fails
+its pull, visible in its `sync_health`.
 
 ---
 

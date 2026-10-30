@@ -1,107 +1,95 @@
 # How it works
 
-Two things are configured, and one thing lives in git:
+Four things are configured:
 
-- A **connector** is a script that knows one type of system, and describes the object types it
-  manages there.
-- An **application** is one live system and its desired state: the connector that reaches it, with its
-  own address and credentials, and a folder in a git project, reconciled as one unit.
-- **Desired state** is YAML in that folder: each file lists the objects of one kind.
+- A **project** is a git repository this instance keeps a checkout of and pulls.
+- An **API** item calls an API when a project changes, with the files that changed.
+- A **script** item runs a file from a repository when a project changes, with what changed in its
+  environment.
+- A **webhook** tells a receiver what happened: a pull, an API run, a script run.
 
-```yaml
-# apps/isilon-prod/nfs-exports.yaml, in the application's git project
-kind: nfs_export
-items:
-  - path: /ifs/data/projects
-    clients: [10.0.0.0/24]
-    read_only: false
-```
+Every item that acts or tells watches one project. Nothing else is in git: the repository holds
+whatever the items read (JSON users, DNS zones, playbooks), in whatever layout suits it.
 
-## The loop
-
-Each application is checked every `sync_interval_seconds`, and on demand (`refresh`, `sync`):
+## A pull, and what it starts
 
 ```mermaid
 flowchart LR
-    A[Pull the project] --> B[Read and validate desired state]
-    B -->|invalid| F[Failed: nothing touched]
-    B --> C[For each kind:<br/>connector list]
-    C --> D[Write the local copy]
-    D --> E[Diff git against it]
-    E -->|refresh, or auto_sync off| P[Report: synced or out of sync]
-    E -->|sync, or auto_sync on| G[Apply each operation]
-    G --> H[List again, update the copy]
-    H --> P
+    P[Pull the project] -->|new commits| F[List the files they touched]
+    P -->|fails| W1[pull_failed]
+    F --> W2[commit_pulled]
+    F --> T{Each API and script:<br/>does its trigger<br/>select a file?}
+    T -->|yes| R[Run it, with those files]
+    R --> E[api_* / script_* events]
+    W1 & W2 & E --> H[Webhooks of the project]
 ```
 
-1. **Pull.** The project is pulled first, on every run (scheduled, Check or Sync), so a commit is
-   picked up at the next check and a Sync right after a commit applies it. A failed pull
-   is recorded on the project and the check goes on against the checkout already on disk.
-2. **Validate.** Every file is parsed and checked before anything else happens: a kind the
-   application's connector manages, every object carrying the kind's key, no key declared twice. Any
-   error fails the run; the system is not listed or changed.
-3. **List.** For each kind in the files, the connector lists what exists now. The answer is
-   written to the local copy (see below) and the diff is taken against it.
-4. **Diff.** Objects are matched on the kind's `key`. Only the fields git declares are compared, so
-   the defaults a system returns are never drift. Nested objects follow the same rule; lists and
-   scalars are compared whole.
-5. **Apply** (sync, or a check with `auto_sync`). Each operation goes to the connector one at a time:
-   creates and updates in `depends_on` order, deletes after them in reverse. A failed operation does
-   not stop the others; the run is `partial`.
-6. **List again.** What was touched is listed once more, so the local copy and the reported status
-   show what the system has after the apply, not what was sent.
+1. **A project is pulled** on its `sync_interval_seconds` or cron `schedule`, at boot, or on
+   demand (`POST /api/v1/projects/{id}/sync`, what a pipeline calls after pushing). A first clone
+   starts nothing: there is nothing to compare it with.
+2. **A pull that brings commits lists the files they touched** (added, changed or removed).
+3. **Each API and script watching that project** whose trigger runs `on: change` and whose
+   `paths` select one of those files **runs, with those files only**. A file another item's paths
+   select runs that item too; a commit touching nothing an item watches does not run it.
+4. **The pull and every run are told** to the project's webhooks that want the event.
 
-## The local copy of each system's settings
+A run that cannot list what came in (git could not say) runs every item of the project, rather than
+silently none.
 
-`state.dir/<application>/<kind>.yaml` holds what the system had at its last check, in the same format as
-a desired-state file. It is refreshed from the system on every check, never only from what this tool
-wrote, so a change made by hand appears there too. Two uses:
+## Triggers
 
-- Diff it against git with any tool, or read it in the UI and at `GET /api/v1/applications/{id}/state/{kind}`.
-- Bring an existing system under management: copy the file into git and edit it down.
+```yaml
+trigger:
+  paths: [users/*.json]          # globs; left out: every file
+  ignore_paths: ["**/*.md"]      # wins over paths
+  on: [change, manual]           # the default; also startup and schedule
+  schedule: "0 3 * * *"          # cron, with schedule in `on`
+  debounce_seconds: 30           # gather quick commits into one run
+```
 
-## Rollback
+| `on` | When | Which files |
+| --- | --- | --- |
+| `change` | A pull brought commits touching a selected file | Those the commits touched |
+| `startup` | The process started, after its first pulls | Every selected file in the checkout |
+| `schedule` | Every occurrence of `schedule` | Every selected file in the checkout |
+| `manual` | `POST /api/v1/{apis,scripts}/{name}/run` | Every selected file in the checkout |
 
-`POST /api/v1/applications/{id}/rollback` with `{"revision": "<commit>"}` (the Rollback button on a
-past sync in the UI) applies the desired state of an older commit, once, the way a sync applies
-HEAD. The checkout stays at HEAD: the commit's folder is exported beside it, fetching history first
-if the shallow checkout does not have it.
+- **Globs** are by path segment: `*` stays inside one, `**` spans any number (none included), `?`
+  is one character. `users/*.json` does not match `users/team/a.json`; `users/**` does.
+- **A debounce** holds a change back that long and adds the changes that arrive meanwhile: three
+  quick pushes make one run with the files of all three.
+- **A dry run** (`?dry_run=true` on a run) is always allowed. It builds every request or command
+  and writes nothing: an API's reads (compare, upsert's exists) are made, its writes are not; a
+  script is not run.
 
-Git still says HEAD afterwards, so the application is marked rolled back and checks stop applying,
-`auto_sync` or not; otherwise the next check would put HEAD straight back. Checks go on comparing,
-and report the application out of sync with git. The mark is kept in the state folder, so a restart
-does not lift it. The next manual Sync applies HEAD again and ends it. To make a rollback last, revert
-the commit in git, then Sync.
+## Runs
 
-## Statuses
+- **One at a time per item.** A run that starts while the item's previous one is still going waits
+  for it, so two commits never interleave their requests to one system.
+- **Kept.** Each item keeps its last 50 runs in memory: why it ran, by whom, at which commit (and
+  for a script, the commit of its own repository), how long it took, and every step: the file, what
+  was done, the status or exit code, the error. `GET /api/v1/apis/{name}` and
+  `GET /api/v1/scripts/{name}` show them; a restart starts the history over.
+- **Told.** A run that works is `api_succeeded` / `script_succeeded`; one that fails is
+  `api_failed` / `script_failed`; the first that works after failures is also `api_recovered` /
+  `script_recovered`.
+- **A failure does not stop the others by default.** With `on_failure: stop`, a failed file ends
+  the run there.
 
-| Application status | Meaning                                                                  |
-| ------------------ | ------------------------------------------------------------------------ |
-| `synced`           | Every declared object exists exactly as declared                         |
-| `out_of_sync`      | The last check found operations to do: new commits, or drift made by hand |
-| `failed`           | The last run could not finish: invalid desired state, a connector error     |
-| `unknown`          | Not checked yet                                                          |
-| `rolled_back`      | Rolled back to an older commit: automatic syncs paused until a manual Sync |
+## Pulls
 
-| Run result    | Meaning                                                                       |
-| ------------- | ----------------------------------------------------------------------------- |
-| `succeeded`   | Nothing to do, or every operation applied                                     |
-| `out_of_sync` | A check (no apply) found operations                                           |
-| `partial`     | An apply where some operations failed; the next run picks up from what is there |
-| `failed`      | The run could not finish                                                      |
+| Event | When |
+| --- | --- |
+| `commit_pulled` | A pull brought commits (with `trigger.paths`, only those touching a selected file) |
+| `pull_failed` | The repository could not be pulled: once, when the project starts failing |
+| `pull_recovered` | Pulls work again after failing |
 
-## Safety rules
+While pulls fail, nothing runs on a change: the checkout stays at the commit it has, and a
+scheduled or manual run uses that commit.
 
-- **No automatic writes by default.** `auto_sync: false` means a check only reports; a person (or a
-  pipeline) presses Sync.
-- **No deletes by default.** With `prune: false`, an object on the system that git does not declare
-  is listed as *unmanaged* and left alone. With `prune: true` it is deleted.
-- **An application only owns what it declares.** Kinds its files never mention are not listed or
-  touched, and its files cannot name another system: where the writes go is the configuration's
-  to say, not the repository's.
-- **One lock per application.** A scheduled check and a manual Sync never interleave. Two
-  applications pointed at the same system are not serialised against each other, so give them
-  different kinds.
-- **Every connector run is bounded.** A connector that hangs is killed at its `timeout_seconds`.
-- **Connectors can only write when asked to.** `UNIFIED_ALLOW_WRITE=1` is set only on `apply`; the SDK
-  refuses to write without it.
+## What stays out of git
+
+An item's connection to a system (its URL, its credential, its auth) is in the configuration
+directory admins own, never in the watched repository: whoever can merge there decides what is
+sent, not where it goes or as whom. A script's file may live in a separate repository
+(`script.project`) with stricter reviewers than the data it reads.
