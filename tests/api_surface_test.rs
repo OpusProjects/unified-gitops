@@ -17,9 +17,12 @@ use unified_gitops::adapters::out::secrets::mock::MockSecrets;
 
 const KEY: &str = "admin-secret";
 
+// Every request the receiver got: its Authorization header and its body.
+type Received = Arc<Mutex<Vec<(Option<String>, Value)>>>;
+
 // A receiver on a free local port; every body it is sent, as JSON.
-async fn receiver() -> (String, Arc<Mutex<Vec<(Option<String>, Value)>>>) {
-    let got: Arc<Mutex<Vec<(Option<String>, Value)>>> = Arc::default();
+async fn receiver() -> (String, Received) {
+    let got: Received = Arc::default();
     let seen = Arc::clone(&got);
     let app = axum::Router::new().route(
         "/hook",
