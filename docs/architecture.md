@@ -31,6 +31,7 @@ their old module paths:
 | `auth-rs`    | `DirectoryPort`, `LdapDirectory`, `LdapConfig<R>`, the login use case | `ports::directory`, `adapters::out::directory`, `application::login` |
 | `auth-rs` (`http`) | API key registry and middleware, session store, CSRF, form layer | `adapters::in::http::auth`, `adapters::in::http::session` |
 | `git-rs`     | `GitPort`, `CliGit`: clone, pull, commits, export, address redaction | `ports::git`, `adapters::out::git::cli`, `domain::project` |
+| `web-rs`     | `ApiError`, `ErrorBody`, audit events, the web UI serving, route help from the OpenAPI document | `http::error`, `http::audit`, `http::ui_assets`, `http::spec` |
 
 What stays here is this service's own: the load-time checks on a credential (`CredentialRules`) and
 the access rule type (`applications`) with what it grants, `Permissions`, how api_keys.yaml becomes keys
@@ -42,10 +43,9 @@ as unified-api's, copied, and should stay the same:
 | Running scripts    | `adapters/out/process_env.rs`, `python.rs` (scrubbed env, venvs) |
 | Project pulls      | `application/projects.rs` (when to pull, the lock, sync health) |
 | Scheduler basics   | jitter, backoff, panic supervisor, reload generations       |
-| HTTP conventions   | `ApiError`, health shapes, metrics recorder, CORS, body limit |
+| HTTP conventions   | health shapes, metrics recorder, CORS, body limit            |
 | Sign-in pages      | the login page, the Users page                              |
 | Configuration      | strict loading, staged validation, atomic commit, live reload |
-| UI serving         | `ui_assets.rs`                                              |
 
 What is gitops' own: the domain (applications, connectors, desired state, plan, runs), the
 connector adapter, the state store, the reconcile use case, and the HTTP routes over them.

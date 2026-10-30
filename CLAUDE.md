@@ -113,7 +113,7 @@ layer). The modules that held them re-export them under their old paths; what st
 that code in the auth repository, release it, then move both services to the new tag in a `build:` PR
 (`cargo update -p secrets-rs -p auth-rs`); never patch a copy here. To try a change first,
 use an uncommitted `[patch."https://github.com/OpusProjects/auth"]` pointing at a local
-checkout. `deny.toml` allows exactly these git sources (auth and git).
+checkout. `deny.toml` allows exactly these git sources (auth, git and web).
 
 Git checkouts come the same way from [git](https://github.com/OpusProjects/git)'s `git-rs` crate:
 `GitPort`, `Remote`, `Commit`, `CommitRange` and `CliGit` (clone, pull, revision, tree, commits,
@@ -121,8 +121,12 @@ export), and `without_userinfo` / `redact_userinfo`, re-exported from `ports::gi
 `adapters::out::git::cli` and `domain::project`. `GitProject::remote()` is what a project hands to git;
 when to pull, the per-checkout lock, webhooks and sync health stay in `application/projects.rs`.
 
-Project pulls, process env, scheduler basics, the config API, metrics plumbing
-and UI serving are still the same code as unified-api's, copied: fix a bug in one, check the other.
+The web layer comes the same way from [web](https://github.com/OpusProjects/web)'s `web-rs` crate:
+`ApiError`/`ErrorBody` (`http::error`), `audit::record`, the web UI serving (`http::ui_assets`, fixed to
+`Permissions`) and the route help the browsable pages read from the OpenAPI document (`http::spec`).
+
+Project pulls, process env, scheduler basics, the config API, metrics plumbing and the
+browsable pages are still the same code as unified-api's, copied: fix a bug in one, check the other.
 
 ## Releasing
 
