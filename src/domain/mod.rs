@@ -5,6 +5,7 @@ pub mod http;
 pub mod ldap;
 pub mod project;
 pub mod run;
+pub mod script;
 pub mod sync_health;
 pub mod template;
 pub mod trigger;

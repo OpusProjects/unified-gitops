@@ -120,6 +120,10 @@ pub enum Event {
     ApiSucceeded,
     ApiFailed,
     ApiRecovered,
+    // The same for its script items.
+    ScriptSucceeded,
+    ScriptFailed,
+    ScriptRecovered,
 }
 
 impl Event {
@@ -131,6 +135,9 @@ impl Event {
             Event::ApiSucceeded => "api_succeeded",
             Event::ApiFailed => "api_failed",
             Event::ApiRecovered => "api_recovered",
+            Event::ScriptSucceeded => "script_succeeded",
+            Event::ScriptFailed => "script_failed",
+            Event::ScriptRecovered => "script_recovered",
         }
     }
 }

@@ -116,6 +116,10 @@ pub async fn sync_project(
             .apis
             .values()
             .any(|i| i.enabled && i.project == project_id)
+            || a.config
+                .scripts
+                .values()
+                .any(|i| i.enabled && i.project == project_id)
     });
     let Pulled {
         result,

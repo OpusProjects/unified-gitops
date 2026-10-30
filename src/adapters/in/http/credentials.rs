@@ -85,6 +85,8 @@ pub struct CredentialUsersInfo {
     pub webhooks: Vec<String>,
     /// API items that call with it
     pub apis: Vec<String>,
+    /// Script items given it
+    pub scripts: Vec<String>,
     /// Whether the LDAP login's service account binds with it
     pub ldap: bool,
 }
@@ -184,6 +186,16 @@ pub async fn list_credentials(
                         .iter()
                         .filter(|(_, a)| a.credentials().contains(&id))
                         .map(|(a, _)| a.clone())
+                        .collect();
+                    ids.sort();
+                    ids
+                },
+                scripts: {
+                    let mut ids: Vec<String> = config
+                        .scripts
+                        .iter()
+                        .filter(|(_, s)| s.credential.as_ref() == Some(id))
+                        .map(|(s, _)| s.clone())
                         .collect();
                     ids.sort();
                     ids

@@ -31,6 +31,8 @@ pub struct AppBuilder {
     credentials: HashMap<String, Credential>,
     webhooks: HashMap<String, domain::webhook::Webhook>,
     apis: HashMap<String, domain::api::Api>,
+    scripts: HashMap<String, domain::script::Script>,
+    process: Arc<dyn ports::process::ProcessPort>,
     http: Arc<dyn ports::http_sender::HttpSenderPort>,
     secrets_settings: config::SecretsConfig,
     projects_dir: std::path::PathBuf,
@@ -59,6 +61,8 @@ impl AppBuilder {
             credentials: HashMap::new(),
             webhooks: HashMap::new(),
             apis: HashMap::new(),
+            scripts: HashMap::new(),
+            process: Arc::new(adapters::out::process::LocalProcess::new()),
             http: Arc::new(adapters::out::http_client::http::ReqwestSender::new()),
             secrets_settings: config::SecretsConfig::default(),
             projects_dir: std::path::PathBuf::from("projects"),
@@ -128,6 +132,17 @@ impl AppBuilder {
         self
     }
 
+    pub fn scripts(mut self, scripts: HashMap<String, domain::script::Script>) -> Self {
+        self.scripts = scripts;
+        self
+    }
+
+    // What runs scripts: a double in tests that should not spawn.
+    pub fn process(mut self, process: Arc<dyn ports::process::ProcessPort>) -> Self {
+        self.process = process;
+        self
+    }
+
     // What webhooks are sent through: a recorder in tests.
     pub fn http(mut self, http: Arc<dyn ports::http_sender::HttpSenderPort>) -> Self {
         self.http = http;
@@ -156,6 +171,7 @@ impl AppBuilder {
         self.credentials = cfg.credentials.clone();
         self.webhooks = cfg.webhooks.clone();
         self.apis = cfg.apis.clone();
+        self.scripts = cfg.scripts.clone();
         self.secrets_settings = cfg.secrets_config.clone();
         self.projects_dir = std::path::PathBuf::from(&cfg.projects_config.dir);
         self.ui = cfg.server.ui.clone();
@@ -260,6 +276,7 @@ impl AppBuilder {
                 credentials: self.credentials,
                 webhooks: self.webhooks,
                 apis: self.apis,
+                scripts: self.scripts,
                 secrets: self.secrets_settings,
                 metrics_require_auth: self.metrics_require_auth,
                 cors_allowed_origins: self.cors_allowed_origins,
@@ -282,6 +299,7 @@ impl AppBuilder {
             login_throttle: Arc::new(crate::application::login::LoginThrottle::default()),
             dispatcher: Arc::new(application::webhooks::Dispatcher::new()),
             http: self.http,
+            process: self.process,
             runner: Arc::new(application::actions::Runner::new()),
         });
         let router = adapters::r#in::http::routes::create_router(

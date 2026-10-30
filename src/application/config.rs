@@ -69,6 +69,7 @@ pub struct ReloadReport {
     pub credentials: SectionDelta,
     pub webhooks: SectionDelta,
     pub apis: SectionDelta,
+    pub scripts: SectionDelta,
 }
 
 impl ReloadReport {
@@ -152,6 +153,7 @@ fn runtime_config(cfg: &AppConfig) -> RuntimeConfig {
         credentials: cfg.credentials.clone(),
         webhooks: cfg.webhooks.clone(),
         apis: cfg.apis.clone(),
+        scripts: cfg.scripts.clone(),
         projects: cfg.projects.clone(),
         secrets: cfg.secrets_config.clone(),
         metrics_require_auth: cfg.server.metrics_require_auth,
@@ -181,6 +183,7 @@ fn diff(
         credentials: SectionDelta::between(&previous.credentials, &next.credentials),
         webhooks: SectionDelta::between(&previous.webhooks, &next.webhooks),
         apis: SectionDelta::between(&previous.apis, &next.apis),
+        scripts: SectionDelta::between(&previous.scripts, &next.scripts),
         ..ReloadReport::default()
     };
 
@@ -190,6 +193,7 @@ fn diff(
         ("credentials", &report.credentials),
         ("webhooks", &report.webhooks),
         ("apis", &report.apis),
+        ("scripts", &report.scripts),
     ] {
         if !delta.is_empty() {
             applied.push(name.to_string());

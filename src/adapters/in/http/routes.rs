@@ -40,6 +40,9 @@ pub fn create_router(state: Arc<AppState>, api_keys: Arc<ApiKeyRegistry>) -> Rou
         .route("/api/v1/apis", get(http::apis::list_apis))
         .route("/api/v1/apis/{id}", get(http::apis::get_api))
         .route("/api/v1/apis/{id}/run", post(http::apis::run_api))
+        .route("/api/v1/scripts", get(http::scripts::list_scripts))
+        .route("/api/v1/scripts/{id}", get(http::scripts::get_script))
+        .route("/api/v1/scripts/{id}/run", post(http::scripts::run_script))
         .route("/api/v1/webhooks", get(http::webhooks::list_webhooks))
         .route("/api/v1/webhooks/{id}", get(http::webhooks::get_webhook))
         .route(
