@@ -9,40 +9,42 @@ startup naming the file and the key. `unified-gitops --check-config [dir]` valid
 ```
 /etc/unified-gitops/
 ├── config.yaml                        # required, at the root, under this name
-├── applications/                      # folders are for people: any names, any depth, or none
-│   ├── storage/
-│   │   ├── isilon-prod.yaml
-│   │   └── isilon-dr.yaml
-│   └── ascender-green.yaml
-├── connectors/
-│   └── powerscale.yaml
-├── projects/
-│   └── desired-state.yaml
+├── projects/                          # folders are for people: any names, any depth, or none
+│   ├── infra.yaml
+│   └── ops-scripts.yaml
+├── apis/
+│   └── portainer/
+│       └── users.yaml
+├── scripts/
+│   └── reload-dns.yaml
+├── webhooks/
+│   └── notify-failures.yaml
 ├── credentials/
-│   └── cred-isilon.yaml
-├── api_keys/
-│   └── key-pipeline.yaml
-└── webhooks/
-    └── wh-failures.yaml
+│   └── cred-portainer.yaml
+└── api_keys/
+    └── key-pipeline.yaml
 ```
 
 | Top-level key  | Holds                                                         |
 | -------------- | ------------------------------------------------------------- |
-| `applications` | Each live system, its folder of desired state, how to enforce it |
-| `connectors`      | Scripts, and how to run them                                  |
-| `projects`     | Git repositories: desired state, and connector scripts           |
+| `projects`     | The git repositories this instance watches (and the ones scripts live in) |
+| `apis`         | APIs to call when a project changes ([apis.md](apis.md))       |
+| `scripts`      | Scripts to run when a project changes ([scripts.md](scripts.md)) |
+| `webhooks`     | What to tell, and where ([webhooks.md](webhooks.md))           |
 | `credentials`  | Where each credential's secrets come from (never the values)  |
 | `api_keys`     | API keys by name and role (the values come from env vars)     |
-| `webhooks` | What runs report, and where: webhooks, Ascender and AWX job templates |
 
-- **The key says what an item is, never the folder.** A file in `connectors/` holding `applications:` is
-  read as an application.
+- **The key says what an item is, never the folder.** A file in `scripts/` holding `apis:` is read
+  as an API.
 - **One item per file is the convention**, not a rule: a file may hold several items, of several
   types. A `name` defined twice is an error naming both files.
-- **`name` is the identity**: what other items reference, what the API and the state
-  directory use. Letters, digits, `-`, `_` and `.`. `description` is optional, for people.
-- **References drop the `_id`:** `connector`, `project`, `credentials` (a list everywhere; a
-  project's holds at most one, and its singular `credential:` still loads, deprecated).
+- **`name` is the identity**: what other items reference, what the API and the UI use. Letters,
+  digits, `-`, `_` and `.`. `description` is optional, for people.
+- **References drop the `_id`:** `project`, `credential` (one per item; a project's is
+  `credentials`, a list of at most one, and its singular `credential:` still loads, deprecated).
+- **Every item that acts or tells** (`apis`, `scripts`, `webhooks`) names the one `project` it
+  watches, and takes `description`, `enabled` (default true) and `labels` (free-form, for finding
+  it).
 - Hidden files and folders are skipped; symlinks are followed (a ConfigMap mount is links).
 - A path may only use letters, digits, `-`, `_` and `.` in each segment.
 
@@ -63,9 +65,6 @@ server:
     # home: "/"                    # where a sign-in with no ?next= lands
     # ldap: {...}                  # see ldap-login.md
 
-state:
-  dir: "/var/lib/unified-gitops/state"     # the local copy of each system's settings
-
 projects:
   dir: "/var/lib/unified-gitops/projects"  # one checkout per project
 
@@ -74,69 +73,62 @@ projects:
 ```
 
 Restart-only (a reload reports them in `restart_required`): `server.host`, `server.port`,
-`server.ui.enabled`, `server.ui.session_ttl_seconds`, `server.ui.assets_dir`, `state.dir`,
-`projects.dir`, `config_api.enabled`. Everything else reloads live.
-
-## applications
-
-One item per live system: how to reach it, and where its desired state lives.
-
-```yaml
-# applications/storage/isilon-prod.yaml
-applications:
-  - name: isilon-prod                  # identity: URLs, the state folder, API keys' scopes
-    description: "Isilon production"
-    # The system
-    connector: powerscale
-    credentials: [cred-isilon]         # handed to the connector as CREDENTIAL_*
-    config:                            # handed to the connector as APPLICATION_CONFIG (not secret)
-      url: "https://isilon-prod.example.com:8080"
-    # The desired state
-    project: desired-state
-    path: apps/isilon-prod             # default "."; every *.yaml / *.yml under it, recursively
-    # How to enforce it
-    sync_interval_seconds: 300         # default 300: how often to compare with the system
-    auto_sync: false                   # default false: true = apply automatically when out of sync
-    prune: false                       # default false: true = delete objects git does not declare
-```
-
-The connection stays here, in the configuration admins own, and never in the desired-state
-repository: whoever can merge there must not be able to point the writes, or the credentials, at
-another system. Two systems with the same settings (production and DR) are two items with the same
-`path`.
-
-## connectors
-
-```yaml
-# connectors/powerscale.yaml
-connectors:
-  - name: powerscale
-    description: "PowerScale"
-    type: script                       # optional, the default (the only type so far)
-    project: connectors                   # optional: resolve path in this checkout
-    path: connectors/powerscale.py
-    timeout_seconds: 120               # each describe/list/apply is killed past this
-```
-
-What a connector manages (its object types, each one's key, what goes first) is not configured: the
-script says it in `describe` (see connectors.md). Application names are path segments in the state
-directory, so they may only contain letters, digits, `-`, `_` and `.`, and may not start with a dot.
+`server.ui.enabled`, `server.ui.session_ttl_seconds`, `server.ui.assets_dir`, `projects.dir`, `config_api.enabled`. Everything else reloads live.
 
 ## projects
 
 ```yaml
-# projects/desired-state.yaml
+# projects/infra.yaml
 projects:
-  - name: desired-state
-    description: "Desired state"
-    git_url: "https://github.example.com/ops/desired-state.git"
+  - name: infra
+    description: "Infrastructure as files"
+    git_url: "https://github.example.com/ops/infra.git"
     branch: main                       # default main
     credentials: [cred-github]         # private repos: one token or ssh_key credential
-    sync_interval_seconds: 1800        # periodic pull; an application also pulls before each check
+    sync_interval_seconds: 60          # periodic pull: how soon a commit is acted on
     # schedule: "0 * * * *"            # cron (UTC) instead of the interval
     timeout_seconds: 300
     sync_on_boot: true
     python_venv: false                 # true = build a virtualenv from its requirements.txt
+```
+
+A pull that brings commits is what runs the project's APIs and scripts and tells its webhooks, so
+the interval (or the schedule) is how soon a commit is acted on. A pipeline that wants it at once
+calls `POST /api/v1/projects/{id}/sync` after pushing. See [projects.md](projects.md).
+
+## apis, scripts and webhooks
+
+Each has its own page with every option: [apis.md](apis.md), [scripts.md](scripts.md),
+[webhooks.md](webhooks.md), and [http-requests.md](http-requests.md) for the request settings APIs
+and webhooks share.
+
+```yaml
+# apis/portainer/users.yaml
+apis:
+  - name: portainer-users
+    project: infra
+    trigger: {paths: [portainer/users/*.json]}
+    credential: cred-portainer
+    api:
+      url: https://portainer.example.com/api/users/$file.stem
+      method: PUT
+
+# scripts/reload-dns.yaml
+scripts:
+  - name: reload-dns
+    project: infra
+    trigger: {paths: [dns/**]}
+    script:
+      project: ops-scripts
+      file: reload-dns.sh
+
+# webhooks/notify-failures.yaml
+webhooks:
+  - name: notify-failures
+    project: infra
+    events: [pull_failed, api_failed, script_failed]
+    webhook:
+      url: https://hooks.example.com/services/x
 ```
 
 ## credentials and api_keys
@@ -144,20 +136,20 @@ projects:
 As in unified-api. A credential names env vars, a file or a Vault path, never a value:
 
 ```yaml
-# credentials/cred-isilon.yaml
+# credentials/cred-portainer.yaml
 credentials:
-  - name: cred-isilon
-    description: "Isilon API user"
+  - name: cred-portainer
+    description: "Portainer API user"
     type: username_password            # username_password | token | ssh_key | vault
     env_vars:                          # field → the env var holding it
-      username: ISILON_USERNAME
-      password: ISILON_PASSWORD
+      username: PORTAINER_USERNAME
+      password: PORTAINER_PASSWORD
     # vault: cred-vault                # or Vault: the type: vault credential to read from
-    # vault_path: "ops/isilon-prod"    #   and the KV v2 path under its mount
-    # secret_file: "/run/secrets/isilon.json"
+    # vault_path: "ops/portainer"      #   and the KV v2 path under its mount
+    # secret_file: "/run/secrets/portainer.json"
 ```
 
-A Vault is a credential too, of `type: vault`, as AWX models a HashiCorp Vault lookup: the
+A Vault is a credential too, of `type: vault`: the
 credentials that read from it name it with `vault:` and say where with `vault_path`. Several Vaults
 can coexist, each with its own login and cache.
 
@@ -183,10 +175,10 @@ credentials:
 | `mount` | The KV v2 mount `vault_path` values live under (default `secret`) |
 | `env_vars.token` / `kubernetes_role` | How to log in: exactly one. `jwt_path` goes with `kubernetes_role` |
 | `timeout_seconds` | Bound on every request (default 10) |
-| `cache_ttl_seconds` | How long a value read from this Vault is reused (default 60; `0` = every resolution): what keeps the check schedule from becoming a request storm, and also how long a rotation takes to show |
+| `cache_ttl_seconds` | How long a value read from this Vault is reused (default 60; `0` = every resolution): what keeps busy schedules from becoming a request storm, and also how long a rotation takes to show |
 
 Credentials *without* a `vault_path` keep resolving from env/files, uncached, so adoption is per
-credential. A Vault credential is never handed to an application, project, webhook or LDAP bind:
+credential. A Vault credential is never handed to a project, API, script, webhook or LDAP bind:
 naming one there is refused, since its token is not a login.
 
 The `secrets:` block in `config.yaml` (`cache_ttl_seconds`, and a single `vault:` with `token_env`)
@@ -196,7 +188,7 @@ it did (in place of each Vault's own cache, never on top of it), and a `vault_pa
 reads from its `vault:`, cached for 60 seconds when `cache_ttl_seconds` is absent, as 0.3.0 did by
 default.
 
-An API key names the env var holding its secret, and is `admin` or restricted to applications:
+An API key names the env var holding its secret, and is `admin` or restricted to projects:
 
 ```yaml
 # api_keys/key-pipeline.yaml
@@ -206,7 +198,7 @@ api_keys:
     env_vars:
       key: GITOPS_PIPELINE_KEY         # the env var holding the secret; `key` is the only field
     role: restricted                   # default restricted; admin = everything
-    applications: [isilon-prod]        # may see, refresh and sync these only
+    projects: [infra]                  # may see and pull these, and see and run their APIs and scripts
 ```
 
 The older `env_prefix` + `secret_keys` (credentials) and `env: VAR` (API keys) still load, with a
@@ -214,45 +206,9 @@ notice at startup and from `--check-config` naming the `env_vars` to write; a la
 Setting both forms on one credential is refused, and so is `env_vars` beside a `vault_path`, a
 `secret_file` or `secret_keys`: a credential reads from one place.
 
-Two rules keep the variables a script or a webhook receives unambiguous (see [secrets](secrets.md)):
-an application's or a webhook's credentials must not be delivered under one id (`cred-vc-aa1` and
-`cred_vc_aa1` both become `CREDENTIAL_VC_AA1_*`), and a webhook's credentials must not share a field,
-since a webhook reads each one by its bare name (`token`, `username`), which a shared field loses.
+How an item uses its credential's fields: an API or a webhook reads them where `auth` and
+`signature` say ([http-requests.md](http-requests.md)); a script receives each as
+`CREDENTIAL_<FIELD>` ([scripts.md](scripts.md)).
 
 `UNIFIED_GITOPS_KEY`, if set, is one more admin key. With no keys at all the API is open, which is
 logged loudly at startup.
-
-## webhooks
-
-Which events, from which applications, go where. The full reference is [webhooks.md](webhooks.md):
-
-```yaml
-# webhooks/wh-ascender-drift.yaml
-webhooks:
-  - name: wh-ascender-drift
-    type: ascender                     # webhook | ascender | awx
-    events: [drift_detected]
-    applications: [isilon-prod]        # or all; left out or [] = none
-    ascender:
-      url: "https://ascender.example.com"
-      job_template: 123
-      credentials: [cred-ascender-jt123]   # its token is the template's webhook key
-```
-
-## Desired-state files
-
-In the application's folder, one kind per file:
-
-```yaml
-kind: nfs_export
-items:
-  - path: /ifs/data/projects
-    clients: [10.0.0.0/24]
-    read_only: false
-```
-
-- `kind` and `items` only; any other top-level key is an error (a file never names its system).
-- Every item has the kind's `key`; a key may appear once across all files of the application.
-- Scalars keep their YAML 1.2 meaning: `0644` and `08001` stay strings, `yes` is a string, `true` a
-  bool. Quote anything meant as a string to be sure.
-- An empty `items:` declares the kind with no objects: with `prune: true`, it removes them all.

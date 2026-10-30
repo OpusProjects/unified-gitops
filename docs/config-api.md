@@ -65,7 +65,7 @@ not set — with a body that says so rather than a bare `404`.
 write, so a push is one request rather than two.
 
 `{path}` is a file's path inside the directory, slashes included, e.g.
-`applications/storage/isilon-prod.yaml` (see configuration.md for the layout).
+`apis/portainer/users.yaml` (see configuration.md for the layout).
 It is a path the loader would read — segments of letters, digits, `-`, `_` and
 `.`, none hidden, ending in `.yaml` or `.yml` — or a `404` naming that rule.
 `config.yaml`, at the root, cannot be deleted.
@@ -88,8 +88,8 @@ curl -sS -X PUT "$BASE/api/v1/config?reload=true" \
   "prune": true,
   "files": {
     "config.yaml": "server:\n  host: \"0.0.0.0\"\n  port: 8183\n",
-    "applications/storage.yaml": "applications:\n  - name: storage\n    connector: powerscale\n    project: prj-state\n    ...\n",
-    "projects/prj-state.yaml": "projects:\n  - name: prj-state\n    git_url: \"...\"\n"
+    "apis/users.yaml": "apis:\n  - name: users\n    project: infra\n    api:\n      url: ...\n",
+    "projects/infra.yaml": "projects:\n  - name: infra\n    git_url: \"...\"\n"
   }
 }
 JSON
@@ -97,14 +97,14 @@ JSON
 
 ```json
 {
-  "written": ["applications/storage.yaml", "config.yaml", "projects/prj-state.yaml"],
+  "written": ["apis/users.yaml", "config.yaml", "projects/infra.yaml"],
   "etag": "9f2c…",
-  "summary": {"applications": 1, "connectors": 0, "credentials": 0,
-              "projects": 1, "api_keys": 0},
+  "summary": {"credentials": 0, "projects": 1, "api_keys": 0,
+              "webhooks": 0, "apis": 1, "scripts": 0},
   "reloaded": {
     "generation": 3,
-    "applied": ["applications"],
-    "applications": {"added": ["storage"], "changed": ["network"]},
+    "applied": ["apis"],
+    "apis": {"added": ["users"], "changed": ["groups"]},
     "api_keys": 2
   },
   "reload_pending": false
@@ -117,13 +117,13 @@ anything:
 ```bash
 curl -sS -X POST "$BASE/api/v1/config/validate" \
   -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
-  -d '{"files": {"config.yaml": "...", "applications/storage.yaml": "..."}, "prune": true}'
+  -d '{"files": {"config.yaml": "...", "apis/users.yaml": "..."}, "prune": true}'
 ```
 
 ```json
 {"valid": false, "errors": [
-  "Application 'storage' references unknown project 'prj-typo'",
-  "Application 'isilon-prod' references unknown connector 'powerscal'"
+  "API 'users' references unknown project 'infra-typo'",
+  "Script 'reload-dns': script.file '../reload.sh' must stay inside the checkout ('..' is not allowed)"
 ]}
 ```
 
@@ -148,8 +148,8 @@ is already running.
 
 | | Effect |
 |---|---|
-| `applications` | New applications start being checked, removed ones stop, changed ones restart on the new settings |
-| `connectors` | Used from the next run of every application |
+| `apis`, `scripts` | Used from their next run; a changed schedule restarts its task |
+| `webhooks` | Used from the next event |
 | `projects` | Pull tasks restart; a project that arrived with the reload is cloned in the background |
 | `credentials`, `secrets:` | The resolver chain is rebuilt (which also drops each Vault's resolution cache) |
 | `api_keys` | In force on the next request |
@@ -160,13 +160,13 @@ is already running.
 
 **Needs a restart** — reported, never silently ignored:
 
-`server.host`, `server.port`, `state.dir`, `projects.dir`, `config_api.enabled`,
+`server.host`, `server.port`, `projects.dir`, `config_api.enabled`,
 `server.ui.enabled`, `server.ui.session_ttl_seconds`, `server.ui.assets_dir`.
 
 A write that touches one of them still lands on disk; the response names it:
 
 ```json
-{"reloaded": {"generation": 4, "applied": ["applications"],
+{"reloaded": {"generation": 4, "applied": ["apis"],
               "restart_required": ["server.port"]}}
 ```
 
@@ -181,10 +181,11 @@ pod (see [observability](observability.md)).
 
 The scheduler does not try to reconfigure its tasks — it replaces them. The
 outgoing generation is told to stop and finishes whatever it was in the middle
-of (an apply is never cut between operations, the same rule shutdown
-follows); a new generation is spawned from the new configuration immediately.
-The two can overlap for the length of one run, which is safe because each
-application holds its own lock for the whole run.
+of (a pull is never cut in the middle, the same rule shutdown follows); a new
+generation is spawned from the new configuration immediately. The two can
+overlap for the length of one pull, which is safe because each checkout has
+its own lock, and runs of one item never overlap whichever generation started
+them. A run in progress finishes on the configuration it started with.
 
 ---
 
@@ -193,9 +194,8 @@ application holds its own lock for the whole run.
 - **Validated as a directory, before anything moves.** The proposed set is
   staged in a temporary directory and loaded there. A rejected change never
   touched the real one.
-- **Rejected whole.** Cross-file references (an application naming a project,
-  a connector and credentials, a restricted key naming an application) only make
-  sense
+- **Rejected whole.** Cross-file references (an item naming a project and a
+  credential, a restricted key naming a project) only make sense
   against the complete set, so the complete set is what is accepted or refused.
 - **Atomic per file.** Every file is written to a temporary name and renamed
   into place, so no reader ever sees a half-written file.
@@ -246,7 +246,7 @@ Every write and reload emits an audit line under the `audit` target, with the
 key that did it and the request id:
 
 ```
-actor=pipeline action=config_write_reload resource=applications/storage.yaml request_id=req-42 outcome=success
+actor=pipeline action=config_write_reload resource=apis/users.yaml request_id=req-42 outcome=success
 ```
 
 `RUST_LOG=audit=info` to isolate them. See [observability](observability.md).

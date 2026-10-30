@@ -17,9 +17,9 @@ metadata:
   labels:
     app: unified-gitops
 spec:
-  # One replica, always: the locks that keep a check and a sync of one application apart
-  # are in-process, so a second replica would check and apply on its own
-  # schedule, against the same systems.
+  # One replica, always: the locks that keep two runs of one item apart are
+  # in-process, so a second replica would pull and run every item on its own,
+  # against the same systems.
   replicas: 1
   selector:
     matchLabels:

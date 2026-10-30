@@ -1,9 +1,9 @@
 # Web UI
 
 The image serves a web UI on the same address as the API: open the instance in a browser, sign in,
-and see every application's status and run history, the connectors, and the projects, credentials,
-metrics and configuration behind them. The pending plan and each system's current settings are in
-the API (`GET /api/v1/applications/{id}` and `…/state/{kind}`).
+and see every project's pulls, every API's and script's runs with their steps and output (and run
+them, or dry-run them, by hand), every webhook's sends, and the credentials, metrics and
+configuration behind them.
 
 The UI is [ui](https://github.com/OpusProjects/ui)'s `apps/unified-gitops`, built
 from the same components as unified-api's UI. Each unified-gitops release builds the ui
@@ -32,8 +32,8 @@ server:
 
 The login page is `/api/v1/login`: an API key, or LDAP when configured (see ldap-login.md). A call
 without a session sends the browser there with `?next=` set to the page it was on. A restricted key
-or LDAP rule sees only its applications; connectors, projects, credentials and the configuration are
-admin-only and leave the menu.
+or LDAP rule sees only its projects and their APIs and scripts; webhooks, credentials and the
+configuration are admin-only and leave the menu.
 
 The session cookie is `ugitops_session`, so signing in to unified-gitops and unified-api on the same
 host (different ports) keeps two separate sessions.

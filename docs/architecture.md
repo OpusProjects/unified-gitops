@@ -5,18 +5,22 @@ Dependency direction: `adapters → application → ports → domain`, never the
 
 ```
 src/
-├── domain/        pure types and rules: Application, Connector, desired-state parsing and
-│                  validation, the diff (plan.rs), run records and statuses (run.rs)
-├── application/   use cases: reconcile (the loop), projects (pull), login, config reload
-├── ports/         traits: ConnectorPort, StateStorePort, GitPort, SecretsPort, DirectoryPort…
+├── domain/        pure types and rules: the items (Api, Script, Webhook), the request they
+│                  share (http.rs), templates, triggers and globs, run records (run.rs)
+├── application/   use cases: projects (pull and tell), actions (which items a commit runs,
+│                  and running them), http (sending one configured request), webhooks
+│                  (messages and their queue), login, config reload
+├── ports/         traits: GitPort, HttpSenderPort, ProcessPort, SecretsPort, DirectoryPort…
 └── adapters/
     ├── in/        HTTP (axum handlers, auth, sessions, metrics, UI assets) and the scheduler
-    └── out/       connector processes, the state folder, git, secrets (env, Vault), LDAP, config store
+    └── out/       git, the HTTP client, script processes, secrets (env, Vault), LDAP, config store
 ```
 
-The loop lives in `application/reconcile.rs` and nowhere else: the HTTP handlers (refresh, sync) and
-the scheduler (periodic checks) both call it. It takes one configuration snapshot for the whole run,
-so a reload in the middle of a run cannot mix an old application with a new connector.
+A pull lives in `application/projects.rs` and nowhere else: the HTTP handler (sync), the scheduler
+and the boot clones all call it, and it hands the commits it brought to `application/actions.rs`,
+which decides which items run. Every outbound request, a webhook's or an API's, is built and sent by
+`application/http.rs`. A pull and a run each take one configuration snapshot, so a reload in the
+middle cannot mix an old item with a new credential.
 
 ## Shared with unified-api
 
@@ -34,7 +38,7 @@ their old module paths:
 | `web-rs`     | `ApiError`, `ErrorBody`, audit events, the web UI serving, route help from the OpenAPI document, the config store and API, the browsable pages, the sign-in form | `http::error`, `http::audit`, `http::ui_assets`, `http::spec`, `http::config`, `ports::config_store`, `adapters::out::config`, `http::html`, `http::login` |
 
 What stays here is this service's own: the load-time checks on a credential (`CredentialRules`) and
-the access rule type (`applications`) with what it grants, `Permissions`, how api_keys.yaml becomes keys
+the access rule type (`projects`) with what it grants, `Permissions`, how api_keys.yaml becomes keys
 and the session cookie's name. These other parts are still the same code
 as unified-api's, copied, and should stay the same:
 
@@ -47,5 +51,5 @@ as unified-api's, copied, and should stay the same:
 | Users page         | `http/users.rs` (fields are each service's own scopes)      |
 | Configuration      | strict loading, live reload                                   |
 
-What is gitops' own: the domain (applications, connectors, desired state, plan, runs), the
-connector adapter, the state store, the reconcile use case, and the HTTP routes over them.
+What is gitops' own: the items and their runs, the request engine, the script runner, and the HTTP
+routes over them.

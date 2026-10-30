@@ -25,8 +25,8 @@ A clear description of the bug, and what you expected instead.
 ## Logs
 
 Paste relevant log lines (run with `RUST_LOG=debug` for more detail). For a
-failing sync/enrich/endpoint, include the `error` field from the response and
-any connector `stderr`.
+failing pull, run or send, include the run's `error` and the failing step's
+`error` and `output`.
 
 ```
 ```

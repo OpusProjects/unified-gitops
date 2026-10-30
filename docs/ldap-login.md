@@ -35,7 +35,7 @@ server:
           groups: ["CN=DL-storage,OU=Groups,DC=example,DC=com"]
           users: [jane.doe]                 # people without a group, by username
           role: restricted                  # the default
-          applications: [storage]           # may see, refresh and sync these
+          projects: [storage]               # may see and pull these, and see and run their APIs and scripts
 ```
 
 The service account comes from a `credentials` item like any other
@@ -58,7 +58,7 @@ attribute.
 ### Access rules
 
 - Evaluated top to bottom, **all matches combined**: `admin` in any matching rule
-  is admin; otherwise the `applications` of every matching rule are unioned.
+  is admin; otherwise the `projects` of every matching rule are unioned.
 - A group written as a **CN** (`DL-ops`) matches any group with that CN; a **DN**
   matches only that group. Both case-insensitive.
 - `role` defaults to `restricted`, the same safe default as API keys: a rule that
@@ -76,7 +76,7 @@ attribute.
 - a `bind_credential` that is not a `credentials` item;
 - a `user_filter` without `{username}`;
 - an empty `access` list, or a rule naming no groups and no users;
-- a rule naming an application that does not exist;
+- a rule naming a project that does not exist;
 - `ldap:` with `server.ui.enabled: false`.
 
 ## How a login works
@@ -89,7 +89,7 @@ attribute.
     │     exactly one entry, or the login fails
     ├─ bind AS that entry with the password typed   (the directory checks it)
     ├─ read group_attribute (memberOf)
-    └─ access rules → admin | restricted(applications) | refused
+    └─ access rules → admin | restricted(projects) | refused
 ```
 
 One connection per login, closed straight after. No password or hash is ever
@@ -146,7 +146,7 @@ What ends it:
 - **a reload that changes `server.ui.ldap`**. A session carries the permissions
   its rules granted at login, so changed rules end the LDAP sessions and the next
   login is judged by the new ones. API key sessions are untouched (a key's
-  removal revokes those), and a reload that changes only applications leaves
+  removal revokes those), and a reload that changes only items or projects leaves
   LDAP sessions alone.
 
 `server.ui.ldap` and `server.ui.home` reload live (`applied` in the reload
