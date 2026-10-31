@@ -13,57 +13,22 @@ from a repository, with what changed in their environment; and it tells webhooks
 Nothing has to reach in, no CI runner has to be registered, and every item is a YAML file in a
 configuration directory.
 
-```yaml
-apis:
-  - name: portainer-users
-    project: infra                      # the watched repository
-    trigger: {paths: [portainer/users/*.json]}
-    credential: cred-portainer
-    api:
-      url: https://portainer.example.com/api/users/$file.stem
-      method: PUT
-      compare: {ignore_fields: [Id]}    # skip what is already there
-      on_delete: {method: DELETE}
-
-scripts:
-  - name: reload-dns
-    project: infra
-    trigger: {paths: [dns/**]}
-    script:
-      project: ops-scripts              # the file can live in another repository
-      file: reload-dns.sh
-      args: [--zone, example.com]
-
-webhooks:
-  - name: notify
-    project: infra
-    events: [commit_pulled, api_failed, script_failed]
-    webhook:
-      url: https://hooks.example.com/services/x
-      body: {text: "$event.project: $event.event at $event.revision_short"}
-```
+See [a complete example](docs/example.md): an API, a script and a webhook.
 
 ---
 
 ## ✨ Features
 
-- **Pull, not push**: repositories are pulled on an interval, a cron schedule or on demand
-- **Acts on what changed**: each item names the files it watches; a commit runs only the items it
-  touched, with only those files
-- **APIs**: one request per changed file (its contents as the body) or per commit; upsert, compare
-  before writing, delete when a file is removed, order, dry run
-- **Scripts**: from the watched repository or another; arguments, environment, stdin, exit codes,
-  timeouts that stop the whole process group, output kept
-- **Webhooks**: any HTTP receiver, the body shaped by a template; pulls, API runs and script runs
-  as events
-- **Every common request option**: bearer, basic, header, query, OAuth 2.0 client credentials,
-  login flows; HMAC signatures; retries with Retry-After; TLS with your own CA or a client
-  certificate; proxies; rate limits; following a job until it finishes
+- **Pull, not push**: repositories pulled on an interval, a cron schedule or on demand
+- **Acts on what changed**: a commit runs only the items whose files it touched
+- **APIs**: a request per changed file or per commit; upsert, compare, delete, dry run
+- **Scripts**: from any repository; args, env, stdin, exit codes, timeouts, output kept
+- **Webhooks**: any HTTP receiver, the body shaped by a template over each event
+- **Every request option**: OAuth 2.0, login flows, HMAC signing, retries, TLS, proxies
 - **Triggers**: on a change, at startup, on a cron schedule or by hand, with a debounce
 - **Run history**: every run, its commit and each step's outcome, in the API and the UI
-- **Config as code**: one item per file, any folders; every template and setting checked at load
-- **Web UI and LDAP sign-in**, API keys scoped by project, secrets from Vault or the environment,
-  Prometheus metrics, live config reload, single binary
+- **Config as code**: one YAML item per file, every template and setting checked at load
+- **Web UI**, LDAP sign-in, scoped API keys, Vault secrets, Prometheus metrics, one binary
 
 ---
 
@@ -72,6 +37,7 @@ webhooks:
 | Document                                  | What it covers                                                         |
 | ----------------------------------------- | ---------------------------------------------------------------------- |
 | [How it works](docs/how-it-works.md)      | Pulls, changed files, triggers, runs and events                         |
+| [Example](docs/example.md)                | A complete configuration directory: an API, a script and a webhook      |
 | [APIs](docs/apis.md)                      | Calling an API with what changed: per file or commit, upsert, compare   |
 | [Scripts](docs/scripts.md)                | Running a script on a change: its file, arguments and environment       |
 | [Webhooks](docs/webhooks.md)              | Telling a receiver what happened: events, the message, body templates   |
