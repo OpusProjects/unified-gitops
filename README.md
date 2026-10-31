@@ -13,7 +13,7 @@ from a repository, with what changed in their environment; and it tells webhooks
 Nothing has to reach in, no CI runner has to be registered, and every item is a YAML file in a
 configuration directory.
 
-See [a complete example](docs/example.md): an API, a script and a webhook on one repository.
+See [a complete example](docs/example.md): an API, a script and a webhook.
 
 ---
 
