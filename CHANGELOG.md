@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.1](https://github.com/OpusProjects/unified-gitops/compare/v0.5.0...v0.5.1) (2026-11-15)
+
+
+### Fixed
+
+* update crates flagged by RustSec advisories ([#51](https://github.com/OpusProjects/unified-gitops/issues/51)) ([97eca4a](https://github.com/OpusProjects/unified-gitops/commit/97eca4a70e8fa079193745b672585dc6df2e9651))
+
 ## [0.5.0](https://github.com/OpusProjects/unified-gitops/compare/v0.4.0...v0.5.0) (2026-10-30)
 
 
