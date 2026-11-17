@@ -323,9 +323,11 @@ fn event_value(
     })
 }
 
+// Whole seconds in UTC with a Z, e.g. 2026-11-17T10:00:00Z: jiff's own
+// format for a timestamp with no fraction. Empty past the year 9999.
 fn rfc3339(unix_seconds: u64) -> String {
-    chrono::DateTime::from_timestamp(unix_seconds as i64, 0)
-        .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    jiff::Timestamp::from_second(unix_seconds as i64)
+        .map(|t| t.to_string())
         .unwrap_or_default()
 }
 

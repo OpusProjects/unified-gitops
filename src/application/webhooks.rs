@@ -40,9 +40,11 @@ pub fn test_message(webhook: &Webhook, base_url: Option<&str>) -> Map<String, Va
     m
 }
 
+// Whole seconds in UTC with a Z, e.g. 2026-11-17T10:00:00Z: jiff's own
+// format for a timestamp with no fraction. Empty past the year 9999.
 fn rfc3339(unix_seconds: u64) -> String {
-    chrono::DateTime::from_timestamp(unix_seconds as i64, 0)
-        .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    jiff::Timestamp::from_second(unix_seconds as i64)
+        .map(|t| t.to_string())
         .unwrap_or_default()
 }
 
@@ -540,6 +542,13 @@ pub fn after_pull(
 
 #[cfg(test)]
 mod tests {
+
+    // The shape chrono gave before the move to jiff: whole seconds, UTC, Z.
+    #[test]
+    fn times_are_whole_seconds_in_utc() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(1_763_373_600), "2025-11-17T10:00:00Z");
+    }
     use super::*;
     use crate::ports::http_sender::{OutboundRequest, OutboundResponse, SendFuture};
 
