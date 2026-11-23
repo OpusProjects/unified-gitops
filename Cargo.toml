@@ -64,7 +64,7 @@ utoipa-swagger-ui = { version = "10", features = ["axum"] }
 # build carries one; "std" for the clock, and no time zone database, since
 # schedules run and timestamps print in UTC.
 croner = { version = "4.0.0", default-features = false, features = ["jiff"] }
-jiff = { version = "0.2", default-features = false, features = ["std"] }
+jiff = { version = "1.0", default-features = false, features = ["std"] }
 # kill(-pgid): a script's timeout stops its whole process group, not only
 # the script (a wrapper's children would outlive it), with SIGTERM first
 # (tokio only sends SIGKILL). Already in the tree through tokio.
