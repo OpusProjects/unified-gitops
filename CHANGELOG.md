@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.3](https://github.com/OpusProjects/unified-gitops/compare/v0.5.2...v0.5.3) (2026-11-25)
+
+
+### Fixed
+
+* **deps:** bump url to 2.5.9 for RUSTSEC-2026-0592 ([#60](https://github.com/OpusProjects/unified-gitops/issues/60)) ([81f1198](https://github.com/OpusProjects/unified-gitops/commit/81f1198d95d508ee5b4d0ca92621f3db890c3c4d))
+
 ## [0.5.2](https://github.com/OpusProjects/unified-gitops/compare/v0.5.1...v0.5.2) (2026-11-17)
 
 
