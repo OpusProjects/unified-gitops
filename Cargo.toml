@@ -44,7 +44,7 @@ git-rs = { git = "https://github.com/OpusProjects/git", tag = "v0.2.1" }
 # The web layer (the error shape, audit events, the web UI, route help from the
 # OpenAPI document), shared with unified-api. See the web repository's
 # docs/development.md for building against a local checkout.
-web-rs = { git = "https://github.com/OpusProjects/web", tag = "v0.3.1" }
+web-rs = { git = "https://github.com/OpusProjects/web", tag = "v0.3.2" }
 tokio = { version = "1", features = ["full"] }
 # Query strings and form bodies, encoded as a browser would. Already in the
 # tree through reqwest.
@@ -60,10 +60,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 utoipa = { version = "6", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "10", features = ["axum"] }
 # jiff, not croner's default chrono: chrono is flagged unmaintained
-# (RUSTSEC-2026-0543). jiff 0.2 is the line croner and web-rs use, so the
+# (RUSTSEC-2026-0543). jiff 1.0 is the line croner and web-rs use, so the
 # build carries one; "std" for the clock, and no time zone database, since
 # schedules run and timestamps print in UTC.
-croner = { version = "4.0.0", default-features = false, features = ["jiff"] }
+croner = { version = "5.0.1", default-features = false, features = ["jiff"] }
 jiff = { version = "1.0", default-features = false, features = ["std"] }
 # kill(-pgid): a script's timeout stops its whole process group, not only
 # the script (a wrapper's children would outlive it), with SIGTERM first
